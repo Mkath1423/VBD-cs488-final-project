@@ -1,12 +1,14 @@
 cmake_minimum_required(VERSION 3.16)
 project(CS488)
 
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
 set(CMAKE_CXX_STANDARD 23)
 
 add_subdirectory(external/glew)
 add_subdirectory(external/glfw)
 
-file(GLOB SRC_FILES
+file(GLOB_RECURSE  SRC_FILES
         src/*.h
         src/*.cpp)
 
