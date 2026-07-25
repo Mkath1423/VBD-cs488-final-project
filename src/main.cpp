@@ -73,8 +73,7 @@ float4x4 lookAtMatrix() {
 
 int main(int argc, char *argv[])
 {
-
-    ResourceManager rm;
+    std::shared_ptr<ResourceManager> rm = std::make_shared<ResourceManager>();
 
     config = parse_args(argc, argv);
 
@@ -160,10 +159,11 @@ int main(int argc, char *argv[])
     // glDeleteShader(fragmentShader);
 
 
-    ResourceHandle defaultShader = rm.add(std::make_unique<Shader>(
+    TypedHandle<Shader> defaultShader = rm->create<Shader>(
         (config.resources / "shaders" / "default.vert"), 
-        (config.resources / "shaders" / "default.frag")));
-
+        (config.resources / "shaders" / "default.frag")
+    );
+    
     
 
     GLfloat vertices[] = {
@@ -207,11 +207,10 @@ int main(int argc, char *argv[])
         float4x4 identity = linalg::identity;
 
         // glUseProgram(shaderProgram);
-        rm.get<Shader>(defaultShader)->useShader();
+        defaultShader->useShader();
 
 
-
-        const GLint modelLoc = rm.get<Shader>(defaultShader)->getUniformLocation("model");
+        const GLint modelLoc = defaultShader->getUniformLocation("model");
         glUniformMatrix4fv(
             modelLoc,
             1,
@@ -221,7 +220,7 @@ int main(int argc, char *argv[])
 
         float4x4 viewMat = lookAtMatrix();
 
-        const GLint viewLoc = rm.get<Shader>(defaultShader)->getUniformLocation("view");
+        const GLint viewLoc = defaultShader->getUniformLocation("view");
         glUniformMatrix4fv(
             viewLoc,
             1,
@@ -236,7 +235,7 @@ int main(int argc, char *argv[])
 
         float4x4 projMat = perspectiveMatrix(globalFOV, globalAspectRatio, globalDepthMin, globalDepthMax);
 
-        const GLint projLoc = rm.get<Shader>(defaultShader)->getUniformLocation("projection");
+        const GLint projLoc = defaultShader->getUniformLocation("projection");
         glUniformMatrix4fv(
             projLoc,
             1,
