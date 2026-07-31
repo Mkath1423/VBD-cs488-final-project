@@ -2,20 +2,14 @@
 
 
 
-uint64_t ResourceHandle::getID() const {
-    return id;
-}
-
-bool ResourceHandle::operator==(const ResourceHandle& rhs) const {
-    return this->getID() == rhs.getID();
-}
-
-void Resource::registerDependency(uint64_t id){
-    dependents.emplace_back(id);
-}
 
 
-bool Resource::init(){
+// void ManagedResource::registerDependency(uint64_t id){
+//     dependents.emplace_back(id);
+// }
+
+
+bool ManagedResource::init(){
     if(!isInitialized){
         isInitialized = init_impl();
     }
@@ -23,23 +17,27 @@ bool Resource::init(){
     return isInitialized;
 }
 
-void Resource::destroy(){
+void ManagedResource::destroy(){
     if(isInitialized) cleanup_impl();
 }
 
 
-Resource::~Resource() {};
+ManagedResource::~ManagedResource() {};
 
 
-
-ResourceHandle ResourceManager::add(std::unique_ptr<Resource> res) {
+uint64_t ResourceManager::add(std::unique_ptr<ManagedResource> res) {
     if(res) res->init();
     
     auto id = next_id;
 
     resources.emplace(id, std::move(res));
 
-    return ResourceHandle(id);
+    return id;
+}
+
+ManagedResource *ResourceManager::get(uint64_t id) {
+    auto it = resources.find(id);
+    if(it != resources.end()) return it->second.get();
 }
 
 ResourceManager::~ResourceManager(){

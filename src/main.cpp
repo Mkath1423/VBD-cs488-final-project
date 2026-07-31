@@ -9,11 +9,15 @@
 
 #include "config.h"
 
-
-#include "resources/resources.h"
+#include "engine.h"
 #include "resources/shader.h"
+#include "resources/trimesh.h"
 
 void key_callback(GLFWwindow* window, int key, int scancode, int action, int mode);
+
+
+void mouse_button_callback(GLFWwindow* window, int button, int action, int mods); 
+void cursor_pos_callback(GLFWwindow* window, double mouse_x, double mouse_y);
 
 Config config;
 
@@ -70,16 +74,7 @@ float4x4 lookAtMatrix() {
     return transpose(out);
 }
 
-
-int main(int argc, char *argv[])
-{
-    std::shared_ptr<ResourceManager> rm = std::make_shared<ResourceManager>();
-
-    config = parse_args(argc, argv);
-
-    // vertexShaderSource = read_file(config.resources / "shaders" / "default.vert");
-    // fragmentShaderSource = read_file(config.resources / "shaders" / "default.frag");
-
+GLFWwindow *setup_window(){
     if (!glfwInit()) {
         std::cerr << "[Init Failed] Could not start glfw." << std::endl;
         exit(-1);
@@ -101,6 +96,8 @@ int main(int argc, char *argv[])
 
     // set callbacks
     glfwSetKeyCallback(window, key_callback);
+    glfwSetMouseButtonCallback(window, mouse_button_callback);
+    glfwSetCursorPosCallback(window, cursor_pos_callback);
 
     glewExperimental = GL_TRUE;
     if (glewInit() != GLEW_OK) {
@@ -114,76 +111,119 @@ int main(int argc, char *argv[])
     glfwGetFramebufferSize(window, &width, &height);
     glViewport(0, 0, width, height);
 
+    return window;
+}
 
-    // // Build and compile our shader program
-    // // Vertex shader
-    // const char* vertSource = vertexShaderSource.c_str();
-    // GLuint vertexShader = glCreateShader(GL_VERTEX_SHADER);
-    // glShaderSource(vertexShader, 1, &vertSource, NULL);
-    // glCompileShader(vertexShader);
-    // // Check for compile time errors
-    // GLint success;
-    // GLchar infoLog[512];
-    // glGetShaderiv(vertexShader, GL_COMPILE_STATUS, &success);
-    // if (!success)
-    // {
-    //     glGetShaderInfoLog(vertexShader, 512, NULL, infoLog);
-    //     std::cout << "ERROR::SHADER::VERTEX::COMPILATION_FAILED\n" << infoLog << std::endl;
-    // }
+struct Vertex {
+    float3 position;
+    float3 velocity;
+};
 
+class ParticleSystem {
+    std::vector<Vertex> vertices;
 
-    // // Fragment shader
-    // const char* fragSource = fragmentShaderSource.c_str();
-    // GLuint fragmentShader = glCreateShader(GL_FRAGMENT_SHADER);
-    // glShaderSource(fragmentShader, 1, &fragSource, NULL);
-    // glCompileShader(fragmentShader);
-    // // Check for compile time errors
-    // glGetShaderiv(fragmentShader, GL_COMPILE_STATUS, &success);
-    // if (!success)
-    // {
-    //     glGetShaderInfoLog(fragmentShader, 512, NULL, infoLog);
-    //     std::cout << "ERROR::SHADER::FRAGMENT::COMPILATION_FAILED\n" << infoLog << std::endl;
-    // }
-    // // Link shaders
-    // GLuint shaderProgram = glCreateProgram();
-    // glAttachShader(shaderProgram, vertexShader);
-    // glAttachShader(shaderProgram, fragmentShader);
-    // glLinkProgram(shaderProgram);
-    // // Check for linking errors
-    // glGetProgramiv(shaderProgram, GL_LINK_STATUS, &success);
-    // if (!success) {
-    //     glGetProgramInfoLog(shaderProgram, 512, NULL, infoLog);
-    //     std::cout << "ERROR::SHADER::PROGRAM::LINKING_FAILED\n" << infoLog << std::endl;
-    // }
-    // glDeleteShader(vertexShader);
-    // glDeleteShader(fragmentShader);
+    TriangleMesh obj;
+
+    float particle_scale = 100;
+
+    void draw_particle(Vertex &v){
+
+    }
+
+    public:
+    void draw(){
+
+    }
+
+};
 
 
-    TypedHandle<Shader> defaultShader = rm->create<Shader>(
+float3 solveHouseholderQR(float3x3 H, float3 f){
+    auto dot_from_k = [](float3 a, float3 b, int k){
+        float acc = 0;
+        
+        for(int i = k; i < 3; ++i){ // row
+            acc += a[i] * b[i]; 
+        }
+
+        return acc;
+    };
+    
+    for(int k = 0; k < 3; ++k){
+        float3 x = H[k];
+
+        float3 vk = x;
+        vk[k] += (x[k] > 0 ? 1 : -1) * sqrt(dot_from_k(x, x, k));
+        vk /= sqrt(dot_from_k(vk, vk, k));
+
+        // update lower right block
+        for(int j = k; j < 3; ++j){ // col
+            float vkTAj = dot_from_k(vk, H[j], k);
+
+            // update R
+            for(int i = k; i < 3; ++i){ // row
+                H[j][i] -= 2 * vk[i] * vkTAj;
+            }   
+        }
+
+        // update QTb
+        float vkTb = dot_from_k(vk, f, k);
+        
+        for(int i = k; i < 3; ++i){ // row
+            f[i] -= 2 * vk[i] * vkTb;
+        }
+    }
+    
+    // backward solve
+    for(int i = 3 - 1; i >= 0; --i){
+        float tmp = 0;
+        for(int j = i+1; j < 3; ++j){
+            tmp += H[i][j] * f[j];
+        }
+        f[i] = (f[i] - tmp) / H[i][i];
+    }
+
+    return f;
+}
+
+int main(int argc, char *argv[])
+{
+
+    Engine engine;
+
+    config = parse_args(argc, argv);
+
+    // vertexShaderSource = read_file(config.resources / "shaders" / "default.vert");
+    // fragmentShaderSource = read_file(config.resources / "shaders" / "default.frag");
+
+    GLFWwindow *window = setup_window();
+
+
+    Resource<Shader> defaultShader = engine.create<Shader>(
         (config.resources / "shaders" / "default.vert"), 
         (config.resources / "shaders" / "default.frag")
     );
-    
-    
 
-    GLfloat vertices[] = {
-        // First triangle
-        -0.9f, -0.5f, 0.0f,  // Left 
-        -0.0f, -0.5f, 0.0f,  // Right
-        -0.45f, 0.5f, 0.0f,  // Top 
-        // Second triangle
-         0.0f, -0.5f, 0.0f,  // Left
-         0.9f, -0.5f, 0.0f,  // Right
-         0.45f, 0.5f, 0.0f   // Top 
-    };
+    // triangle mesh resource
+    TriangleMesh obj((config.resources / "models" / "smallsphere.obj"));
+    obj.load();
 
-    GLuint VBO, VAO;
+    GLuint VBO, VAO, EBO;
+
     glGenVertexArrays(1, &VAO);
     glGenBuffers(1, &VBO);
+    glGenBuffers(1, &EBO);
     glBindVertexArray(VAO);
 
     glBindBuffer(GL_ARRAY_BUFFER, VBO);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
+    glBufferData(GL_ARRAY_BUFFER, obj.positions.size() * sizeof(GLfloat), obj.positions.data(), GL_STATIC_DRAW);
+        
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, EBO);
+    glBufferData(
+        GL_ELEMENT_ARRAY_BUFFER,
+        obj.faces.size() * sizeof(unsigned int),
+        obj.faces.data(),
+        GL_STATIC_DRAW);
 
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(GLfloat), (GLvoid*)0);
     glEnableVertexAttribArray(0);
@@ -192,9 +232,82 @@ int main(int argc, char *argv[])
 
     glBindVertexArray(0);
 
+    // particle system resource
+    std::vector<Vertex> vertices;
+
+    for(int i = 0; i < 10; ++ i){
+        vertices.emplace_back();
+        vertices[i].position = float3(i, 1.0f, i);
+        vertices[i].velocity = float3(0.0f, 5.0 * i + 2.0, 0.0f);
+    }
+
+    const float timestep = 1.0/60.0;
+
+    const double dt = 1.0 / 60.0;
+    double last = glfwGetTime();
+    double accumulator = 0.0;
+
+    float3 gravity(0.0, -9.8, 0.0);
+
+    float stiffness = 1e+5;
+    float planey = -1;
+    float3 planen(0.0, 1.0, 0.0); 
+
+    float mass = 1.0;
+
     while (!glfwWindowShouldClose(window))
     {
+
+        double now = glfwGetTime();
+        accumulator += now - last;
+        last = now;
+        
         glfwPollEvents();
+
+        while (accumulator >= timestep)
+        {
+            // naive physics update
+            for(auto &v : vertices){
+                float3 y = v.position + timestep * v.velocity + timestep * timestep * gravity;
+                float3 x_new = y;
+
+                for(int i = 0; i < 5; ++i){
+                    float3 f = - mass * (x_new - y) / (timestep * timestep );
+                    float3 H = float3(mass / (timestep * timestep));
+
+                    float3 diff = float3(0.0, planey - x_new.y, 0.0);
+                    float pen = dot(diff, planen);
+                    if (pen > 0) {
+                        f += stiffness * planen * diff;
+                        H.y += stiffness;
+                    }
+                    float3x3 Hmat;
+                    for(int i = 0; i < 3; ++i){
+                        Hmat[i][i] = H[i];
+                    }
+
+                    
+
+                    float3 dx = solveHouseholderQR(Hmat, f);
+                    if(length(dx) > 1){
+                        printf("length(dx)=  %f\n", length(dx));
+                        printf("H = I[%f %f %f]^T\n", H.x, H.y, H.z);
+                        // exit(-1);
+                    }
+
+                    // float3 dx = float3(f.x/H.x, f.y/H.y, f.z/H.z);
+                    x_new += dx;
+                }
+                
+                // pred - v.position + float3(0.0, () * (stiffness * pen), 0.0);
+
+                // no external forces yields the following
+                v.velocity = (x_new - v.position) / timestep;
+                v.position = x_new;
+            }
+
+            accumulator -= timestep;
+        }
 
         // Render
         // Clear the colorbuffer
@@ -203,8 +316,11 @@ int main(int argc, char *argv[])
 
         // Draw our first triangle
 
-
+        for(auto &v : vertices){
+            
         float4x4 identity = linalg::identity;
+        identity *= 10;
+        identity.w = float4(v.position.x,v.position.y, v.position.z, 1.0);
 
         // glUseProgram(shaderProgram);
         defaultShader->useShader();
@@ -244,8 +360,15 @@ int main(int argc, char *argv[])
         );
 
         glBindVertexArray(VAO);
+        glDrawElements(
+            GL_TRIANGLES,
+            obj.faces.size(),                  // number of indices
+            GL_UNSIGNED_INT,
+            nullptr);
         glDrawArrays(GL_TRIANGLES, 0, 6); 
         glBindVertexArray(0);
+        
+        }
 
         glfwSwapBuffers(window);
     }
@@ -263,4 +386,14 @@ void key_callback(GLFWwindow* window, int key, int scancode, int action, int mod
 {
     if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS)
         glfwSetWindowShouldClose(window, GL_TRUE);
+}
+
+void mouse_button_callback(GLFWwindow* window, int button, int action, int mods) {
+    
+}
+
+
+// mouse button events (you do not need to modify it unless you want to)
+void cursor_pos_callback(GLFWwindow* window, double mouse_x, double mouse_y) {
+	
 }

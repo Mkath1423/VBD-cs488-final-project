@@ -17,7 +17,7 @@ std::string read_file(const std::filesystem::path &resourcePath);
 
 
 
-class Shader : public Resource {
+class Shader : public ManagedResource {
     const std::filesystem::path vert;
     const std::filesystem::path frag;
 
