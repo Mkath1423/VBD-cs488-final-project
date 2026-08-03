@@ -11,7 +11,7 @@
 
 #include "engine.h"
 #include "resources/shader.h"
-#include "resources/trimesh.h"
+#include "resources/meshes.h"
 
 void key_callback(GLFWwindow* window, int key, int scancode, int action, int mode);
 
@@ -38,41 +38,9 @@ std::string fragmentShaderSource;
 using namespace linalg::aliases;
 
 
-const float3 origin = { 0.0, 0.0, -10 };
-const float3 poi = { 0.0, 0.0, 0.0 };
-const float3 up = { 0.0, 1.0, 0.0 };
+#include "rendering.h"
 
 
-constexpr float PI = 3.14159265358979f;
-constexpr float DegToRad = PI / 180.0f;
-constexpr float RadToDeg = 180.0f / PI;
-
-float4x4 perspectiveMatrix(float fovy, float aspect, float zNear, float zFar) {
-    float4x4 m;
-    const float f = 1.0f / (tan(fovy * DegToRad / 2.0f));
-    m[0] = { f / aspect, 0.0f, 0.0f, 0.0f };
-    m[1] = { 0.0f, f, 0.0f, 0.0f };
-    m[2] = { 0.0f, 0.0f, (zFar + zNear) / (zNear - zFar), -1.0f };
-    m[3] = { 0.0f, 0.0f, (2.0f * zFar * zNear) / (zNear - zFar), 0.0f };
-
-    return m;
-}
-
-float4x4 lookAtMatrix() {
-
-    float3 forward = normalize(poi - origin);
-    float3 right = normalize(cross(forward, up));
-    float3 localUp = normalize(cross(right, forward));
-    
-    float4x4 out;
-
-    out[0] = { right.x, right.y, right.z, -dot(origin, right) };
-    out[1] = { localUp.x, localUp.y, localUp.z, -dot(origin, localUp) };
-    out[2] = { -forward.x, -forward.y, -forward.z, dot(origin, forward)};
-    out[3] = { 0.0f, 0.0f, 0.0f, 1.0f };
-
-    return transpose(out);
-}
 
 GLFWwindow *setup_window(){
     if (!glfwInit()) {
@@ -84,6 +52,8 @@ GLFWwindow *setup_window(){
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
     glfwWindowHint(GLFW_RESIZABLE, GL_FALSE);
+
+    glfwWindowHint(GLFW_DEPTH_BITS, 24);
 
     GLFWwindow* window = glfwCreateWindow(config.width, config.height, "Vertex Block Descent", nullptr, nullptr);
     if (!window) {
@@ -111,32 +81,18 @@ GLFWwindow *setup_window(){
     glfwGetFramebufferSize(window, &width, &height);
     glViewport(0, 0, width, height);
 
+    glEnable(GL_DEPTH_TEST);
+    glDepthFunc(GL_LESS);
+
     return window;
 }
+
+
 
 struct Vertex {
     float3 position;
     float3 velocity;
 };
-
-class ParticleSystem {
-    std::vector<Vertex> vertices;
-
-    TriangleMesh obj;
-
-    float particle_scale = 100;
-
-    void draw_particle(Vertex &v){
-
-    }
-
-    public:
-    void draw(){
-
-    }
-
-};
-
 
 float3 solveHouseholderQR(float3x3 H, float3 f){
     auto dot_from_k = [](float3 a, float3 b, int k){
@@ -186,51 +142,53 @@ float3 solveHouseholderQR(float3x3 H, float3 f){
     return f;
 }
 
-int main(int argc, char *argv[])
-{
-
+GLFWwindow *window;
+void run(){
     Engine engine;
 
-    config = parse_args(argc, argv);
 
     // vertexShaderSource = read_file(config.resources / "shaders" / "default.vert");
     // fragmentShaderSource = read_file(config.resources / "shaders" / "default.frag");
 
-    GLFWwindow *window = setup_window();
+    Resource<Camera> mainCamera = engine.create<Camera>();
+    mainCamera->origin = { 0.0, 0.0, -10 };
+    mainCamera->poi = { 0.0, 0.0, 0.0 };
+    mainCamera->up = { 0.0, 1.0, 0.0 };
 
+    float globalAspectRatio = float(config.width) / float(config.height);
+    float globalFOV = 45.0f; // vertical field of view
+    float globalDepthMin = 5.0E-02; // for rasterization
+    float globalDepthMax = 100.0f; // for rasterization
+
+    mainCamera->aspect = globalAspectRatio;
+    mainCamera->fovy = globalFOV;
+    mainCamera->zNear = globalDepthMin;
+    mainCamera->zFar = globalDepthMax;
+
+    mainCamera->buildMatrices();
 
     Resource<Shader> defaultShader = engine.create<Shader>(
         (config.resources / "shaders" / "default.vert"), 
         (config.resources / "shaders" / "default.frag")
     );
 
-    // triangle mesh resource
-    TriangleMesh obj((config.resources / "models" / "smallsphere.obj"));
-    obj.load();
+    Resource<StaticTriangleMesh> obj = engine.create<StaticTriangleMesh>(
+        (config.resources / "models" / "smallsphere.obj")
+    );
 
-    GLuint VBO, VAO, EBO;
-
-    glGenVertexArrays(1, &VAO);
-    glGenBuffers(1, &VBO);
-    glGenBuffers(1, &EBO);
-    glBindVertexArray(VAO);
-
-    glBindBuffer(GL_ARRAY_BUFFER, VBO);
-    glBufferData(GL_ARRAY_BUFFER, obj.positions.size() * sizeof(GLfloat), obj.positions.data(), GL_STATIC_DRAW);
-        
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, EBO);
-    glBufferData(
-        GL_ELEMENT_ARRAY_BUFFER,
-        obj.faces.size() * sizeof(unsigned int),
-        obj.faces.data(),
-        GL_STATIC_DRAW);
-
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(GLfloat), (GLvoid*)0);
-    glEnableVertexAttribArray(0);
-
-    glBindBuffer(GL_ARRAY_BUFFER, 0); 
-
-    glBindVertexArray(0);
+    auto base_tet_model = (config.resources / "models" / "tet_sphere");
+    Resource<TetrahedraMesh> obj2 = engine.create<TetrahedraMesh>(
+        base_tet_model / "tet_sphere.node",
+        base_tet_model / "tet_sphere.ele",
+        base_tet_model / "tet_sphere.face"
+    );
+    
+    base_tet_model = (config.resources / "models" / "single_tet");
+    Resource<TetrahedraMesh> single_tet = engine.create<TetrahedraMesh>(
+        base_tet_model / "single_tet.node",
+        base_tet_model / "single_tet.ele",
+        base_tet_model / "single_tet.face"
+    );
 
     // particle system resource
     std::vector<Vertex> vertices;
@@ -264,6 +222,7 @@ int main(int argc, char *argv[])
         
         glfwPollEvents();
 
+        // physics stepping
         while (accumulator >= timestep)
         {
             // naive physics update
@@ -272,7 +231,7 @@ int main(int argc, char *argv[])
                 float3 x_new = y;
 
                 for(int i = 0; i < 5; ++i){
-                    float3 f = - mass * (x_new - y) / (timestep * timestep );
+                    float3 f = - mass * (x_new - y) / (timestep * timestep);
                     float3 H = float3(mass / (timestep * timestep));
 
                     float3 diff = float3(0.0, planey - x_new.y, 0.0);
@@ -312,9 +271,7 @@ int main(int argc, char *argv[])
         // Render
         // Clear the colorbuffer
         glClearColor(0.2f, 0.3f, 0.3f, 1.0f);
-        glClear(GL_COLOR_BUFFER_BIT);
-
-        // Draw our first triangle
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
         for(auto &v : vertices){
             
@@ -334,49 +291,41 @@ int main(int argc, char *argv[])
             &identity[0][0]
         );
 
-        float4x4 viewMat = lookAtMatrix();
-
         const GLint viewLoc = defaultShader->getUniformLocation("view");
         glUniformMatrix4fv(
             viewLoc,
             1,
             GL_FALSE,
-            &viewMat[0][0]
+            &mainCamera->viewMat()[0][0]
         );
-
-        float globalAspectRatio = float(config.width) / float(config.height);
-        float globalFOV = 45.0f; // vertical field of view
-        float globalDepthMin = 5.0E-02; // for rasterization
-        float globalDepthMax = 100.0f; // for rasterization
-
-        float4x4 projMat = perspectiveMatrix(globalFOV, globalAspectRatio, globalDepthMin, globalDepthMax);
 
         const GLint projLoc = defaultShader->getUniformLocation("projection");
         glUniformMatrix4fv(
             projLoc,
             1,
             GL_FALSE,
-            &projMat[0][0]
+            &mainCamera->projMat()[0][0]
         );
+        
+        obj->draw();
 
-        glBindVertexArray(VAO);
-        glDrawElements(
-            GL_TRIANGLES,
-            obj.faces.size(),                  // number of indices
-            GL_UNSIGNED_INT,
-            nullptr);
-        glDrawArrays(GL_TRIANGLES, 0, 6); 
-        glBindVertexArray(0);
+        // single_tet->draw();
         
         }
 
         glfwSwapBuffers(window);
     }
+}
 
+int main(int argc, char *argv[])
+{
 
-    glDeleteVertexArrays(1, &VAO);
-    glDeleteBuffers(1, &VBO);
+    config = parse_args(argc, argv);
 
+    window = setup_window();
+
+    run();
+    
     glfwTerminate();
 
     return 0;

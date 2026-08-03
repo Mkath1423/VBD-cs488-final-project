@@ -28,7 +28,7 @@ ManagedResource::~ManagedResource() {};
 uint64_t ResourceManager::add(std::unique_ptr<ManagedResource> res) {
     if(res) res->init();
     
-    auto id = next_id;
+    auto id = next_id++;
 
     resources.emplace(id, std::move(res));
 
@@ -38,6 +38,7 @@ uint64_t ResourceManager::add(std::unique_ptr<ManagedResource> res) {
 ManagedResource *ResourceManager::get(uint64_t id) {
     auto it = resources.find(id);
     if(it != resources.end()) return it->second.get();
+    return nullptr;
 }
 
 ResourceManager::~ResourceManager(){

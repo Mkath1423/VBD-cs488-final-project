@@ -11,6 +11,7 @@ add_subdirectory(external/glfw)
 file(GLOB_RECURSE  SRC_FILES
         src/*.h
         src/*.cpp)
+message(STATUS "${SRC_FILES}")
 
 add_executable(CS488
         ${SRC_FILES})
