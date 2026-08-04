@@ -146,10 +146,6 @@ GLFWwindow *window;
 void run(){
     Engine engine;
 
-
-    // vertexShaderSource = read_file(config.resources / "shaders" / "default.vert");
-    // fragmentShaderSource = read_file(config.resources / "shaders" / "default.frag");
-
     Resource<Camera> mainCamera = engine.create<Camera>();
     mainCamera->origin = { 0.0, 0.0, -10 };
     mainCamera->poi = { 0.0, 0.0, 0.0 };
@@ -166,6 +162,8 @@ void run(){
     mainCamera->zFar = globalDepthMax;
 
     mainCamera->buildMatrices();
+
+    Renderer renderer(mainCamera);
 
     Resource<Shader> defaultShader = engine.create<Shader>(
         (config.resources / "shaders" / "default.vert"), 
@@ -267,52 +265,29 @@ void run(){
 
             accumulator -= timestep;
         }
-
+        
+        
+        
         // Render
         // Clear the colorbuffer
         glClearColor(0.2f, 0.3f, 0.3f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-        for(auto &v : vertices){
-            
-        float4x4 identity = linalg::identity;
-        identity *= 10;
-        identity.w = float4(v.position.x,v.position.y, v.position.z, 1.0);
+        // render a particle system
+        // move this in to a callback
+        {
+            renderer.setShader(defaultShader);
 
-        // glUseProgram(shaderProgram);
-        defaultShader->useShader();
+            for (auto& v : vertices) {
+                float4x4 modelMat = linalg::identity;
+                modelMat *= 10;
+                modelMat.w = float4(v.position.x, v.position.y, v.position.z, 1.0);
 
-
-        const GLint modelLoc = defaultShader->getUniformLocation("model");
-        glUniformMatrix4fv(
-            modelLoc,
-            1,
-            GL_FALSE,
-            &identity[0][0]
-        );
-
-        const GLint viewLoc = defaultShader->getUniformLocation("view");
-        glUniformMatrix4fv(
-            viewLoc,
-            1,
-            GL_FALSE,
-            &mainCamera->viewMat()[0][0]
-        );
-
-        const GLint projLoc = defaultShader->getUniformLocation("projection");
-        glUniformMatrix4fv(
-            projLoc,
-            1,
-            GL_FALSE,
-            &mainCamera->projMat()[0][0]
-        );
-        
-        obj->draw();
-
-        // single_tet->draw();
-        
+                renderer.setTransform(modelMat);
+                obj->draw();
+            }
         }
-
+        
         glfwSwapBuffers(window);
     }
 }
@@ -346,3 +321,145 @@ void mouse_button_callback(GLFWwindow* window, int button, int action, int mods)
 void cursor_pos_callback(GLFWwindow* window, double mouse_x, double mouse_y) {
 	
 }
+
+/*
+class Physics
+
+
+class SimulationObject {
+    virtual inertialComponent() = default
+
+    virtual constraintComponent() = 0
+        different types of bodies will expect different types of collision results (i believe)
+        maybe split this up into several cases
+
+    virtual bodyComponent() = do nothing
+
+    virtual draw() = do nothing
+}
+
+class Particle : SimO {
+    one physics vertex
+
+    has a radius
+    has a shared ptr to mesh and shared ptr to shader
+}
+
+class ElasticBody : SimO {
+    has many vertices
+    has boundary face indices
+    has element indices 
+
+    tracks which vertices and elements are on the boundary
+    tracks which elements belong to each vertex
+    tracks which elements should not collide with each other (i.e. neighbors)
+    boundary tets also track which face is the boundary (i.e. which vertex is not a boundary)
+}
+
+class PhysicsSystem {
+    has references to all the bodies
+
+    generate constraints and contacts
+        build acceleration structure    
+
+        sweep for possible interation // or do all pairs
+            for a possible interation
+                go to the interaction case
+
+        particle particle
+            radius test
+        
+        particle plane
+            radius test
+
+            
+        particle plane
+            radius test
+
+        particle boundary-mesh-face
+            ...
+
+
+        // for the elastic meshes
+
+        vertex face 
+            same as the previous actually
+
+        edge edge
+            ???
+
+
+        vertex boundary-plane
+            same as vertex face basically
+
+        // scratch the below
+        particle boundary-tet
+            test against boundary face
+
+        boundary-tet boundary-tet
+            check if they should be masked
+            use GJK to find initial simplex
+            use EPA to find the supporting simplex on each tet
+            this tells us if we have a p-f or e-e collision
+
+            store a contact on either the p e or f
+             * also check if the contact has already been generated
+             * several tets can have a vertex A, 
+               * if A is contacting face B then it will be doing so in several tets
+             * not sure if there is a way to avoid that extra work 
+            
+
+            need the barycentric coordinates (at least one will be 0)
+             * we can write the provided energy term as a function of the tet vertices
+             * then we can differentiate wrt each vertex
+
+        boundary-tet plane
+            
+
+        
+        for every particle
+            test against every particle
+             * generate: ParticleParticle p1 p2
+            test every particle against the faces of every elastic
+            test against the faces of every static
+            test against plane primatives
+
+
+
+
+    step()
+        determine constraints on all the physics vertices
+         * contact
+         * boundaries 
+        
+        until converged or stop
+          for every body
+            for every vertex
+                create initial guess
+
+          for every body 
+            for every vertex
+                build f and H using
+
+        steps the physics
+
+}
+
+class Simulation {
+    init()
+        create all the objects in the world
+        configure a physics system and register things with that
+
+        load all the shaders and file resources that it needs
+
+        setup rendering information when building the various scene objects
+
+    stepPhysics()
+        invoke the physics system
+
+    draw()
+        for every sim object
+
+}
+
+*/

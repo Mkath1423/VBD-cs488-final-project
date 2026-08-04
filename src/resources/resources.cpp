@@ -19,6 +19,7 @@ bool ManagedResource::init(){
 
 void ManagedResource::destroy(){
     if(isInitialized) cleanup_impl();
+    isInitialized = false;
 }
 
 

@@ -18,15 +18,19 @@ class ResourceHandle {
 
 
 template <typename T>
-class Resource : ResourceHandle {
+class Resource : public ResourceHandle {
     
     public:
+
     Resource(uint64_t _id, std::shared_ptr<ResourceManager> _rm) : 
         ResourceHandle(_id, _rm) {}
+
+    Resource() : Resource(0, nullptr) {}
 
     T *get() const;
     T *operator->() const;
 };
+
 
 class Engine {
     std::shared_ptr<ResourceManager> resourceManager;
@@ -36,7 +40,10 @@ class Engine {
         void cleanup(); // take down gl and such
 
     public:
-        Engine() : resourceManager{std::make_shared<ResourceManager>()} {}
+        Engine() : 
+            resourceManager{} {
+            resourceManager = std::make_shared<ResourceManager>();
+        }
 
         template<typename T, typename... Args>
         Resource<T> create(Args &&... args) {

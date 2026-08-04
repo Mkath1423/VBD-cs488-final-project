@@ -5,13 +5,13 @@
 #include "linalg.h"
 using namespace linalg::aliases;
 
+
+#include "resources/shader.h"
 #include "engine.h"
 
 constexpr float PI = 3.14159265358979f;
 constexpr float DegToRad = PI / 180.0f;
 constexpr float RadToDeg = 180.0f / PI;
-
-
 
 class Camera : public ManagedResource{
     private:
@@ -45,8 +45,6 @@ class Camera : public ManagedResource{
         return m;
     }
 
-    
-
     public:
 
     float fovy, aspect, zNear, zFar;
@@ -78,22 +76,62 @@ class Camera : public ManagedResource{
 };
 
 class Renderer {
-    
-}
+    std::vector<void*> renderObjects;
 
-class RenderComponent {
-    virtual draw() = 0;
+    Resource<Shader> currentShader;
+    Resource<Camera> camera;
+
+    public:
+
+    void addRenderObject(){
+
+    }
+
+    void setShader(Resource<Shader> newShader) {
+        if(newShader == currentShader) return;
+        currentShader = newShader;
+        
+        currentShader->useShader();
+
+        const GLint viewLoc = currentShader->getUniformLocation("view");
+        glUniformMatrix4fv(
+            viewLoc,
+            1,
+            GL_FALSE,
+            &camera->viewMat()[0][0]
+        );
+
+        const GLint projLoc = currentShader->getUniformLocation("projection");
+        glUniformMatrix4fv(
+            projLoc,
+            1,
+            GL_FALSE,
+            &camera->projMat()[0][0]
+        );
+    }
+
+    void setTransform(const float4x4 &modelMat) {
+        const GLint modelLoc = currentShader->getUniformLocation("model");
+        glUniformMatrix4fv(
+            modelLoc,
+            1,
+            GL_FALSE,
+            &modelMat[0][0]
+        );
+    }
+
+    Renderer(Resource<Camera> camera) : camera{camera} { 
+        
+    }
+
+    void render(){
+        // camera->buildMatrices();
+        
+        // glClearColor(0.2f, 0.3f, 0.3f, 1.0f);
+        // glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+        // for(auto &r : renderObjects){
+        //     // r->draw(*this);
+        // }
+    }
 };
-
-class ParticleSystemRenderComponent {
-    Resource<Shader> 
-
-}
-
-class ParticleSystemNode {
-    // physics stuff
-    Resource<ParticleSystem> particles;
-
-    Resource<ParticleDrawer> drawer;
-    Resource<ParticleCollider> collider;
-}

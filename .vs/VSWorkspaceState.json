@@ -1,0 +1,14 @@
+{
+  "OutputFoldersPerTargetSystem": {
+    "Local Machine": [
+      "out\\build\\Visual Studio Community 2022 Release - amd64",
+      "out\\install\\Visual Studio Community 2022 Release - amd64"
+    ]
+  },
+  "ExpandedNodes": [
+    "",
+    "\\resources",
+    "\\src"
+  ],
+  "PreviewInSolutionExplorer": false
+}
