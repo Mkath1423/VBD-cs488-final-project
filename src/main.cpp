@@ -9,29 +9,8 @@
 
 #include "config.h"
 
-#include "engine.h"
 #include "resources/shader.h"
 #include "resources/meshes.h"
-
-void key_callback(GLFWwindow* window, int key, int scancode, int action, int mode);
-
-
-void mouse_button_callback(GLFWwindow* window, int button, int action, int mods); 
-void cursor_pos_callback(GLFWwindow* window, double mouse_x, double mouse_y);
-
-Config config;
-
-const GLuint WIDTH = 800, HEIGHT = 600;
-
-// Shaders
-//const GLchar* vertexShaderSource = "#version 330 core\n"
-//"layout (location = 0) in vec3 position;\n"
-//"void main()\n"
-//"{\n"
-//"gl_Position = vec4(position.x, position.y, position.z, 1.0);\n"
-//"}\0";
-std::string vertexShaderSource;
-std::string fragmentShaderSource;
 
 #include "linalg.h"
 
@@ -41,6 +20,12 @@ using namespace linalg::aliases;
 #include "rendering.h"
 
 
+void key_callback(GLFWwindow* window, int key, int scancode, int action, int mode);
+void mouse_button_callback(GLFWwindow* window, int button, int action, int mods); 
+void cursor_pos_callback(GLFWwindow* window, double mouse_x, double mouse_y);
+
+Config config;
+GLFWwindow* window;
 
 GLFWwindow *setup_window(){
     if (!glfwInit()) {
@@ -87,25 +72,18 @@ GLFWwindow *setup_window(){
     return window;
 }
 
-
-
-struct Vertex {
-    float3 position;
-    float3 velocity;
-};
-
-float3 solveHouseholderQR(float3x3 H, float3 f){
-    auto dot_from_k = [](float3 a, float3 b, int k){
+float3 solveHouseholderQR(float3x3 H, float3 f) {
+    auto dot_from_k = [](float3 a, float3 b, int k) {
         float acc = 0;
-        
-        for(int i = k; i < 3; ++i){ // row
-            acc += a[i] * b[i]; 
+
+        for (int i = k; i < 3; ++i) { // row
+            acc += a[i] * b[i];
         }
 
         return acc;
-    };
-    
-    for(int k = 0; k < 3; ++k){
+        };
+
+    for (int k = 0; k < 3; ++k) {
         float3 x = H[k];
 
         float3 vk = x;
@@ -113,27 +91,27 @@ float3 solveHouseholderQR(float3x3 H, float3 f){
         vk /= sqrt(dot_from_k(vk, vk, k));
 
         // update lower right block
-        for(int j = k; j < 3; ++j){ // col
+        for (int j = k; j < 3; ++j) { // col
             float vkTAj = dot_from_k(vk, H[j], k);
 
             // update R
-            for(int i = k; i < 3; ++i){ // row
+            for (int i = k; i < 3; ++i) { // row
                 H[j][i] -= 2 * vk[i] * vkTAj;
-            }   
+            }
         }
 
         // update QTb
         float vkTb = dot_from_k(vk, f, k);
-        
-        for(int i = k; i < 3; ++i){ // row
+
+        for (int i = k; i < 3; ++i) { // row
             f[i] -= 2 * vk[i] * vkTb;
         }
     }
-    
+
     // backward solve
-    for(int i = 3 - 1; i >= 0; --i){
+    for (int i = 3 - 1; i >= 0; --i) {
         float tmp = 0;
-        for(int j = i+1; j < 3; ++j){
+        for (int j = i + 1; j < 3; ++j) {
             tmp += H[i][j] * f[j];
         }
         f[i] = (f[i] - tmp) / H[i][i];
@@ -142,60 +120,222 @@ float3 solveHouseholderQR(float3x3 H, float3 f){
     return f;
 }
 
-GLFWwindow *window;
-void run(){
-    Engine engine;
 
-    Resource<Camera> mainCamera = engine.create<Camera>();
-    mainCamera->origin = { 0.0, 0.0, -10 };
-    mainCamera->poi = { 0.0, 0.0, 0.0 };
-    mainCamera->up = { 0.0, 1.0, 0.0 };
+struct Vertex {
+    float3 position;
+    float3 prevPosition;
+    float3 velocity;
+};
+
+
+template <size_t vertex_degree>
+class Integrator {
+    typename vec<float, vertex_degree> floatN;
+    typename mat<float, vertex_degree, vertex_degree> floatNxN;
+
+
+    class VertexProxy {
+        vec<float, vertex_degree> position;
+    };
+
+    // internal representation is decided by the implementaion
+    virtual void get_body(size_t id, size_t vertices) = 0;
+    virtual void get_vertex_position()
+};
+
+class Integrator3dof {
+
+
+    Integrator3dof(size_t num_blocks) {
+
+    }
+
+    inline void integrate(size_t vid, float3& position, float& mass, float3 f, float3x3 H) {
+
+    }
+};
+
+class SimulationObject {
+
+};
+
+struct Entities {
+    std::shared_ptr<SimulationObject> obj;
+    uint64_t render_proxy;
+
+    Entities(): obj{nullptr}, render_proxy{0} {}
+};
+
+
+class World {
+    std::vector<SimulationObject*> simObjects;
+
+    /*init()
+    create all the objects in the world
+    configure a physics system and register things with that
+
+    load all the shaders and file resources that it needs
+
+    setup rendering information when building the various scene objects
+
+    stepPhysics()
+    invoke the physics system
+
+    draw()
+    for every sim object*/
+
+public:
+    virtual void step(float dt) = 0;
+
+
+    /*void draw() {
+        for (auto o : simObjects) {
+            o->draw();
+        }
+    }*/
+};
+
+struct Particles : SimulationObject {
+    std::vector<Vertex> vertices;
+
+    float radius;
+
+    
+    public:
+    
+    Particles(size_t n, float radius) :
+        radius { radius }
+    {
+        for (int i = 0; i < 10; ++i) {
+            vertices.emplace_back();
+            vertices[i].position = float3(i, 1.0f, i);
+            vertices[i].prevPosition = float3(i, 1.0f, i);
+            vertices[i].velocity = float3(0.0f, 5.0 * i + 2.0, 0.0f);
+        }
+    }
+
+    friend class ParticleRenderProxy;
+};
+
+class ParticleRenderProxy : public RenderProxy {
+
+    // rendering parameters
+    std::shared_ptr<Shader> shader;
+    std::shared_ptr<StaticTriangleMesh> mesh;
+
+    // synced state
+    std::vector<float3> positions;
+    float radius;
+
+    std::shared_ptr<Particles> simulationObject;
+
+public:
+    ParticleRenderProxy(std::shared_ptr<Particles> _simulationObject, std::shared_ptr<Shader> _shader, std::shared_ptr<StaticTriangleMesh> _mesh) :
+        simulationObject{ std::move(_simulationObject) },
+        shader{ std::move(_shader) },
+        mesh{ std::move(_mesh) } {
+    }
+
+    void sync() override {
+        if (!simulationObject) return;
+
+        positions.clear();
+        for (const auto& v : simulationObject->vertices) {
+            positions.emplace_back(v.position);
+        }
+
+        radius = simulationObject->radius;
+    }
+
+    void draw(Renderer& renderer) override {
+        if (!simulationObject) return;
+
+        renderer.setShader(shader);
+
+        for (auto& p : positions) {
+            float4x4 modelMat = linalg::identity;
+            modelMat *= radius;
+            modelMat.w = float4(p.x, p.y, p.z, 1.0);
+
+            renderer.setTransform(modelMat);
+            mesh->draw();
+        }
+    }
+};
+
+
+//class VBDStepper3dof {
+//    inline void initialize(float timestep, float3& prevPosition, float3& position, float3& velocity) {
+//
+//        float3 y = prevPosition + timestep * velocity + timestep * timestep * gravity;
+//        float3 x_new = y;
+//    }
+//
+//    inline void solveStep(float3& prevPosition, float3& position, float3& velocity, float3 f, float3x3 H) {
+//        float3 dx = solveHouseholderQR(H, f);
+//        if (length(dx) > 1) {
+//            printf("length(dx)=  %f\n", length(dx));
+//            printf("H = I[%f %f %f]^T\n", H.x, H.y, H.z);
+//            // exit(-1);
+//        }
+//        // optionally do a line search
+//        // float3 dx = float3(f.x/H.x, f.y/H.y, f.z/H.z);
+//        position += dx;
+//    }
+//    
+//    inline void updateVelocity(float3 &prevPosition, float3 &position, float3 &velocity) {
+//
+//    }
+//};
+
+void run(){
+
+
+    Camera mainCamera;
+    mainCamera.origin = { 0.0, 0.0, -10 };
+    mainCamera.poi = { 0.0, 0.0, 0.0 };
+    mainCamera.up = { 0.0, 1.0, 0.0 };
 
     float globalAspectRatio = float(config.width) / float(config.height);
     float globalFOV = 45.0f; // vertical field of view
     float globalDepthMin = 5.0E-02; // for rasterization
     float globalDepthMax = 100.0f; // for rasterization
 
-    mainCamera->aspect = globalAspectRatio;
-    mainCamera->fovy = globalFOV;
-    mainCamera->zNear = globalDepthMin;
-    mainCamera->zFar = globalDepthMax;
+    mainCamera.aspect = globalAspectRatio;
+    mainCamera.fovy = globalFOV;
+    mainCamera.zNear = globalDepthMin;
+    mainCamera.zFar = globalDepthMax;
 
-    mainCamera->buildMatrices();
+    mainCamera.buildMatrices();
 
     Renderer renderer(mainCamera);
 
-    Resource<Shader> defaultShader = engine.create<Shader>(
+    std::shared_ptr<Shader> defaultShader = Shader::create(
         (config.resources / "shaders" / "default.vert"), 
         (config.resources / "shaders" / "default.frag")
     );
 
-    Resource<StaticTriangleMesh> obj = engine.create<StaticTriangleMesh>(
+    std::shared_ptr<StaticTriangleMesh> obj = StaticTriangleMesh::create(
         (config.resources / "models" / "smallsphere.obj")
     );
 
     auto base_tet_model = (config.resources / "models" / "tet_sphere");
-    Resource<TetrahedraMesh> obj2 = engine.create<TetrahedraMesh>(
+    std::shared_ptr<TetrahedraMesh> obj2 = TetrahedraMesh::create(
         base_tet_model / "tet_sphere.node",
         base_tet_model / "tet_sphere.ele",
         base_tet_model / "tet_sphere.face"
     );
     
     base_tet_model = (config.resources / "models" / "single_tet");
-    Resource<TetrahedraMesh> single_tet = engine.create<TetrahedraMesh>(
+    std::shared_ptr<TetrahedraMesh> single_tet = TetrahedraMesh::create(
         base_tet_model / "single_tet.node",
         base_tet_model / "single_tet.ele",
         base_tet_model / "single_tet.face"
     );
 
-    // particle system resource
-    std::vector<Vertex> vertices;
-
-    for(int i = 0; i < 10; ++ i){
-        vertices.emplace_back();
-        vertices[i].position = float3(i, 1.0f, i);
-        vertices[i].velocity = float3(0.0f, 5.0 * i + 2.0, 0.0f);
-    }
+    // particle system
+    std::shared_ptr<Particles> particles = std::make_shared<Particles>(10, 10.0);
+    auto particles_proxy_id = renderer.addProxy(std::make_unique<ParticleRenderProxy>(particles, defaultShader, obj));
 
     const float timestep = 1.0/60.0;
 
@@ -221,72 +361,67 @@ void run(){
         glfwPollEvents();
 
         // physics stepping
-        while (accumulator >= timestep)
-        {
-            // naive physics update
-            for(auto &v : vertices){
-                float3 y = v.position + timestep * v.velocity + timestep * timestep * gravity;
-                float3 x_new = y;
 
-                for(int i = 0; i < 5; ++i){
-                    float3 f = - mass * (x_new - y) / (timestep * timestep);
-                    float3 H = float3(mass / (timestep * timestep));
+        if (accumulator >= timestep) {
+            while (accumulator >= timestep)
+            {
+                // naive physics update
+                for (auto& v : particles->vertices) {
+                    float3 y = v.position + timestep * v.velocity + timestep * timestep * gravity;
+                    float3 x_new = y;
 
-                    float3 diff = float3(0.0, planey - x_new.y, 0.0);
-                    float pen = dot(diff, planen);
-                    if (pen > 0) {
-                        f += stiffness * planen * diff;
-                        H.y += stiffness;
+                    for (int i = 0; i < 5; ++i) {
+                        float3 f = -mass * (x_new - y) / (timestep * timestep);
+                        float3 H = float3(mass / (timestep * timestep));
+
+                        float3 diff = float3(0.0, planey - x_new.y, 0.0);
+                        float pen = dot(diff, planen);
+                        if (pen > 0) {
+                            f += stiffness * planen * diff;
+                            H.y += stiffness;
+                        }
+                        float3x3 Hmat;
+                        for (int i = 0; i < 3; ++i) {
+                            Hmat[i][i] = H[i];
+                        }
+
+
+
+                        float3 dx = solveHouseholderQR(Hmat, f);
+                        if (length(dx) > 1) {
+                            printf("length(dx)=  %f\n", length(dx));
+                            printf("H = I[%f %f %f]^T\n", H.x, H.y, H.z);
+                            // exit(-1);
+                        }
+
+                        // float3 dx = float3(f.x/H.x, f.y/H.y, f.z/H.z);
+                        x_new += dx;
                     }
-                    float3x3 Hmat;
-                    for(int i = 0; i < 3; ++i){
-                        Hmat[i][i] = H[i];
-                    }
 
-                    
+                    // pred - v.position + float3(0.0, () * (stiffness * pen), 0.0);
 
-                    float3 dx = solveHouseholderQR(Hmat, f);
-                    if(length(dx) > 1){
-                        printf("length(dx)=  %f\n", length(dx));
-                        printf("H = I[%f %f %f]^T\n", H.x, H.y, H.z);
-                        // exit(-1);
-                    }
-
-                    // float3 dx = float3(f.x/H.x, f.y/H.y, f.z/H.z);
-                    x_new += dx;
+                    // no external forces yields the following
+                    v.velocity = (x_new - v.position) / timestep;
+                    v.position = x_new;
                 }
-                
-                // pred - v.position + float3(0.0, () * (stiffness * pen), 0.0);
 
-                // no external forces yields the following
-                v.velocity = (x_new - v.position) / timestep;
-                v.position = x_new;
+                accumulator -= timestep;
             }
 
-            accumulator -= timestep;
+            renderer.sync();
         }
+
+        renderer.render();
+        
+
         
         
-        
-        // Render
-        // Clear the colorbuffer
-        glClearColor(0.2f, 0.3f, 0.3f, 1.0f);
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        //// Render
+        //// Clear the colorbuffer
+        //glClearColor(0.2f, 0.3f, 0.3f, 1.0f);
+        //glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-        // render a particle system
-        // move this in to a callback
-        {
-            renderer.setShader(defaultShader);
-
-            for (auto& v : vertices) {
-                float4x4 modelMat = linalg::identity;
-                modelMat *= 10;
-                modelMat.w = float4(v.position.x, v.position.y, v.position.z, 1.0);
-
-                renderer.setTransform(modelMat);
-                obj->draw();
-            }
-        }
+        //particles.draw(renderer);
         
         glfwSwapBuffers(window);
     }

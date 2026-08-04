@@ -104,7 +104,7 @@ class RenderMesh  {
     }
 };
 
-struct StaticTriangleMesh : public ManagedResource {
+struct StaticTriangleMesh : public SharableResource<StaticTriangleMesh> {
     RenderMesh renderMesh;
 
     const std::filesystem::path objFile;
@@ -115,8 +115,7 @@ struct StaticTriangleMesh : public ManagedResource {
 
     }
 
-    
-    virtual bool init_impl(){
+    bool init() {
         if(!load_obj_file(objFile, mesh)) {
             std::cerr << "StaticTriangleMesh: Failed to load file: " << objFile << std::endl;
             return false;
@@ -128,19 +127,20 @@ struct StaticTriangleMesh : public ManagedResource {
         
         return true;
     }
-
-
-    virtual void cleanup_impl(){
-        renderMesh.free_buffers();
-    }
     
+    ~StaticTriangleMesh() {
+        if (initialized) {
+            renderMesh.free_buffers();
+        }
+    }
+
     void draw(){
         renderMesh.draw_triangles();
     }
 };
 
 
-struct TetrahedraMesh : public ManagedResource {
+struct TetrahedraMesh : public SharableResource<TetrahedraMesh> {
     RenderMesh renderMesh;
 
     const std::filesystem::path nodePath, elementPath, facePath;
@@ -154,9 +154,8 @@ struct TetrahedraMesh : public ManagedResource {
         nodePath{nodePath},
         elementPath{elementPath}, 
         facePath{facePath} {}
-
     
-    virtual bool init_impl(){
+    bool init() {
         if(!load_tet_gen_file(nodePath, elementPath, facePath, mesh)) {
             std::cerr << "TetrahedraMesh: Failed to load file: " << 
                 nodePath << " " << elementPath << " " << facePath << std::endl;
@@ -169,10 +168,11 @@ struct TetrahedraMesh : public ManagedResource {
         
         return true;
     }
-
-
-    virtual void cleanup_impl(){
-        renderMesh.free_buffers();
+    
+    ~TetrahedraMesh() {
+        if (initialized) {
+            renderMesh.free_buffers();
+        }
     }
     
     void draw(){

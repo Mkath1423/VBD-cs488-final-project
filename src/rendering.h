@@ -1,19 +1,17 @@
 #pragma once
 
 #include <vector>
-
+#include <map>
 #include "linalg.h"
 using namespace linalg::aliases;
 
-
 #include "resources/shader.h"
-#include "engine.h"
 
 constexpr float PI = 3.14159265358979f;
 constexpr float DegToRad = PI / 180.0f;
 constexpr float RadToDeg = 180.0f / PI;
 
-class Camera : public ManagedResource{
+class Camera {
     private:
     
     float4x4 view, proj;
@@ -75,21 +73,44 @@ class Camera : public ManagedResource{
 
 };
 
+class Renderer;
+
+class RenderProxy {
+public:
+    virtual void sync() = 0;
+    virtual void draw(Renderer& renderer) = 0;
+};
+
 class Renderer {
+    std::map<uint64_t, std::unique_ptr<RenderProxy>> proxies;
+    uint64_t next_id = 1;
+       
     std::vector<void*> renderObjects;
 
-    Resource<Shader> currentShader;
-    Resource<Camera> camera;
+    std::shared_ptr<Shader> currentShader;
+    Camera camera;
 
     public:
 
-    void addRenderObject(){
+    uint64_t addProxy(std::unique_ptr<RenderProxy> proxy){
+        
+        uint64_t id = next_id;
+        next_id++;
 
+        proxies.emplace(id, std::move(proxy));
+
+        return id;
     }
 
-    void setShader(Resource<Shader> newShader) {
+    void removeProxy(uint64_t id) {
+        proxies.erase(id);
+    }
+
+    void setShader(std::shared_ptr<Shader> newShader) {
         if(newShader == currentShader) return;
-        currentShader = newShader;
+        currentShader = std::move(newShader);
+
+        if (!currentShader) return;
         
         currentShader->useShader();
 
@@ -98,7 +119,7 @@ class Renderer {
             viewLoc,
             1,
             GL_FALSE,
-            &camera->viewMat()[0][0]
+            &camera.viewMat()[0][0]
         );
 
         const GLint projLoc = currentShader->getUniformLocation("projection");
@@ -106,7 +127,7 @@ class Renderer {
             projLoc,
             1,
             GL_FALSE,
-            &camera->projMat()[0][0]
+            &camera.projMat()[0][0]
         );
     }
 
@@ -120,18 +141,22 @@ class Renderer {
         );
     }
 
-    Renderer(Resource<Camera> camera) : camera{camera} { 
-        
+    Renderer(const Camera &camera) : camera{camera} { }
+
+    void sync() {
+        for (const auto& [_, p] : proxies) {
+            if(p) p->sync();
+        }
     }
 
     void render(){
-        // camera->buildMatrices();
+         camera.buildMatrices();
         
-        // glClearColor(0.2f, 0.3f, 0.3f, 1.0f);
-        // glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+         glClearColor(0.2f, 0.3f, 0.3f, 1.0f);
+         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-        // for(auto &r : renderObjects){
-        //     // r->draw(*this);
-        // }
+         for (const auto& [_, p] : proxies) {
+             if (p) p->draw(*this);
+         }
     }
 };
