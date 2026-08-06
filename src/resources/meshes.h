@@ -11,6 +11,12 @@
 
 #include "../utilities/file_reading.h"
 
+#include <map>
+#include <vector>
+
+#include "linalg.h"
+using namespace linalg::aliases;
+
 
 
 class RenderMesh  {
@@ -64,14 +70,6 @@ class RenderMesh  {
         }
     }
 
-    void buffer_vertices(void *vertices, size_t _nVertices){
-        bind();
-        nVertices = _nVertices;
-        glBufferData(GL_ARRAY_BUFFER, 
-            nVertices * sizeof(GLfloat), vertices, GL_STATIC_DRAW);
-        unbind();
-    }
-
     void buffer_data(void *vertices, size_t _nVertices, void *indicies, size_t _nIndicies){
         bind();
 
@@ -82,6 +80,26 @@ class RenderMesh  {
             
         glBufferData(GL_ELEMENT_ARRAY_BUFFER, 
             nIndicies * sizeof(unsigned int), indicies, GL_STATIC_DRAW);
+
+        unbind();
+    }
+
+    void buffer_elements(void* indicies, size_t _nIndicies) {
+        bind();
+
+        nIndicies = _nIndicies;
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER,
+            nIndicies * sizeof(unsigned int), indicies, GL_STATIC_DRAW);
+
+        unbind();
+    }
+
+    void buffer_vertices(void* vertices, size_t _nVertices) {
+        bind();
+
+        nVertices = _nVertices;
+        glBufferData(GL_ARRAY_BUFFER,
+            nVertices * sizeof(GLfloat), vertices, GL_STATIC_DRAW);
 
         unbind();
     }
@@ -141,11 +159,33 @@ struct StaticTriangleMesh : public SharableResource<StaticTriangleMesh> {
 
 
 struct TetrahedraMesh : public SharableResource<TetrahedraMesh> {
-    RenderMesh renderMesh;
-
     const std::filesystem::path nodePath, elementPath, facePath;
     
-    TetGenFileData mesh;
+    TetGenFileData fileData;
+
+    size_t num_elements;
+    size_t num_vertices;
+    size_t num_faces;
+
+    float volume = 0;
+    float3 center;
+
+    struct Element {
+        uint4 indicies;
+        float rest_volume;
+        float3x3 Dminv;
+    };
+
+    std::vector<Element> elementData;
+
+    struct VertexElementIndex {
+        unsigned int elementIdx, subIdx;
+
+        VertexElementIndex(): elementIdx{0}, subIdx{0} {}
+        VertexElementIndex(unsigned int elementIdx, unsigned int subIdx) : elementIdx{ elementIdx }, subIdx{ subIdx } {}
+    };
+
+    std::map<unsigned int, std::vector<VertexElementIndex>> vertex_adjacency;
 
     TetrahedraMesh(
         std::filesystem::path nodePath,
@@ -153,29 +193,81 @@ struct TetrahedraMesh : public SharableResource<TetrahedraMesh> {
         std::filesystem::path facePath) : 
         nodePath{nodePath},
         elementPath{elementPath}, 
-        facePath{facePath} {}
+        facePath{facePath},
+        num_elements{ 0 },
+        num_vertices{ 0 },
+        num_faces{ 0 },
+        center{0, 0, 0} {
+    }
     
+    float3 position(size_t idx) {
+        return float3(
+            fileData.positions[3 * idx + 0],
+            fileData.positions[3 * idx + 1],
+            fileData.positions[3 * idx + 2]
+        );
+    }
+
+    uint3 face(size_t idx) {
+        return uint3(
+            fileData.faces[3 * idx + 0],
+            fileData.faces[3 * idx + 1],
+            fileData.faces[3 * idx + 2]
+        );
+    }
+
+    uint4 element(size_t idx) {
+        return uint4(
+            fileData.elements[fileData.element_size * idx + 0],
+            fileData.elements[fileData.element_size * idx + 1],
+            fileData.elements[fileData.element_size * idx + 2],
+            fileData.elements[fileData.element_size * idx + 3]
+        );
+    }
+
     bool init() {
-        if(!load_tet_gen_file(nodePath, elementPath, facePath, mesh)) {
+        if(!load_tet_gen_file(nodePath, elementPath, facePath, fileData)) {
             std::cerr << "TetrahedraMesh: Failed to load file: " << 
                 nodePath << " " << elementPath << " " << facePath << std::endl;
             return false;
         }
 
-        renderMesh.buffer_data(
-            mesh.positions.data(), mesh.positions.size(), 
-            mesh.faces.data(), mesh.faces.size());
-        
-        return true;
-    }
-    
-    ~TetrahedraMesh() {
-        if (initialized) {
-            renderMesh.free_buffers();
+        num_elements = fileData.elements.size() / fileData.element_size;
+        num_vertices = fileData.positions.size() / 3;
+        num_faces = fileData.faces.size() / 3;
+
+        center = float3(0.0);
+
+        for (int i = 0; i < num_vertices; ++i) {
+            center += position(i);
         }
-    }
-    
-    void draw(){
-        renderMesh.draw_triangles();
+
+        center /= num_vertices;
+
+        volume = 0.0;
+
+        for (unsigned int i = 0; i < num_elements; ++i) {
+            auto &ele = elementData.emplace_back();
+            
+            ele.indicies = element(i);
+
+            vertex_adjacency[ele.indicies.x].push_back(VertexElementIndex( i, 0 ));
+            vertex_adjacency[ele.indicies.y].push_back(VertexElementIndex( i, 1 ));
+            vertex_adjacency[ele.indicies.z].push_back(VertexElementIndex( i, 2 ));
+            vertex_adjacency[ele.indicies.w].push_back(VertexElementIndex( i, 3 ));
+
+            float3 a = position(ele.indicies.x);
+            float3 b = position(ele.indicies.y);
+            float3 c = position(ele.indicies.z);
+            float3 d = position(ele.indicies.w);
+
+            ele.rest_volume = std::abs(dot(cross(b - a, c - a), d - a)) / 6.0;
+            volume += ele.rest_volume;
+
+            ele.Dminv = linalg::inverse(float3x3(b - a, c - a, d - a));
+
+        }
+
+        return true;
     }
 };

@@ -82,29 +82,11 @@ public:
 };
 
 class Renderer {
-    std::map<uint64_t, std::unique_ptr<RenderProxy>> proxies;
-    uint64_t next_id = 1;
-       
-    std::vector<void*> renderObjects;
-
+  
     std::shared_ptr<Shader> currentShader;
     Camera camera;
 
     public:
-
-    uint64_t addProxy(std::unique_ptr<RenderProxy> proxy){
-        
-        uint64_t id = next_id;
-        next_id++;
-
-        proxies.emplace(id, std::move(proxy));
-
-        return id;
-    }
-
-    void removeProxy(uint64_t id) {
-        proxies.erase(id);
-    }
 
     void setShader(std::shared_ptr<Shader> newShader) {
         if(newShader == currentShader) return;
@@ -143,20 +125,12 @@ class Renderer {
 
     Renderer(const Camera &camera) : camera{camera} { }
 
-    void sync() {
-        for (const auto& [_, p] : proxies) {
-            if(p) p->sync();
-        }
-    }
+    
 
-    void render(){
+    void startFrame(){
          camera.buildMatrices();
         
          glClearColor(0.2f, 0.3f, 0.3f, 1.0f);
          glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-
-         for (const auto& [_, p] : proxies) {
-             if (p) p->draw(*this);
-         }
     }
 };
