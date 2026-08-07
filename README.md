@@ -10,8 +10,36 @@ Navigation
 
 ## Description
 
+For my project, I built a soft-body physics simulation using an energy optimization method called Vertex Block Descent. My simulation includes 3 types of objects. I've implemented soft bodies built from tetrahedral models with deformation energy defined by a stable neo-hookean model. Ridgid spherical particles are included to better demonstrate the behavior of the algorithm with the presence of stiff interactions. Finally, there is a static boundary plane. Collisions between the plane and either of the two body types are modeled using a stiff spring energy term. I've used my implementation to demonstrate some of the failure conditions of the algorithm and draw some conclusions about its viability as a physics engine for games. 
+
+The algorithm fails to converge to a good solution when there are very high mass to stiff ratios. Hard constraints (like the boundary plane) are also difficult to model correctly since the optimal stiffness (visually speaking) depends on the mass and momentum of the object (as well as the material stiffness of the soft bodies). The rayleigh damping factor has a similar problem, where the best damping factor is observed to be dependent on the material parameters of the soft bodies. (See the implementation section for details about the convergence criterions). This aligns well with anecdotal evidence from other developers who have implemented the algorithm.
+
+In all of my tests, the algorithm converged in a similar number of steps. In all my tests, the algorithm stops yielding any significant changes after less than 10 iterations. In well-conditioned cases, 2-5 steps are already enough for good convergence. But in the failure cases I demonstrated, even running the algorithm for 100 iterations yields no visible improvement.
+
+Since a game scene can change at runtime, a game physics engine must be relatively insensitive to the scene configuration. With VBD, it is not good enough to find a single "good" parameterization, as this "good" solution might change while the game progresses. Furthermore, the characteristics of a "good" parameterization are not simple enough for most non-technical developers to understand easily. This would, of course, make it hard for developers to want to migrate to this system. 
+
+The formulation does have some merits. The integrator itself is relatively easy to implement and very flexible in how you can add new force terms and other elements to the simulation. The formulation is also highly parallel in nature and is robust to large timesteps. Simple scenes yielded good results for timesteps of 1/6s to over 1s (a timestep of 1/60s is used in all my demo scenes). Neither of these were fully explored here, but both are important to note. That said, the numerical issues need to be improved significantly before it can be properly adopted into a game engine.   
+
+For future work, it would be interesting to see how much of an improvement the AVBD algorithm can make on the stiffness issues for hard constraints (this algorithm uses lagrange multipliers to model them). It would also be interesting to see if the collision stiffness can be tuned on a per-contact basis rather than providing a single value for everything. 
 
 ## User Guide
+ * Press W to move towards the scene POI, S to move away from it.
+ * Press A to rotate left around the scene POI and D to rotate right.
+ * Press Q to move up, Z to move down.
+ * Press P to pause and unpause the simulation
+ * Press K to enter or exit the debug scene (this was only really used to test configuration as I built them. It is also useful if you which to tune some of the parameters in the debugScene function and see what changes).
+ * When not in  the debug scene, Press left(right) arrow to move to the next(previous) demo world.
+ * Press R to restart the current world.
+
+Shaders and model files can be found in the resources folder. All code is in src.
+
+## Screenshots
+
+screenshot1 has 2 tetrahedrons, one with high material stiffness and one with a low material stiffness. We can see the less stiff one undergoing some deformations after hitting the ground and the stiff one holding its shape well.
+
+screenshot2 has a 5-tet cube model and some rigid particles resting stably on the ground after making contact.
+
+You can see these scene being animated in my demo video.
 
 ## Compilation
 
@@ -54,9 +82,31 @@ Data and code sources, the re-use and adaptation of existing code, and any ackno
 Caveats, bugs, cautions, assumptions. -->
 ### Algorithms, data structures, and complexities
 
-### global constants and configurability,
+The main complexities come from the math and not the algorithms. The Neo-Hookean model I use 
 
-### Input/output syntax, pre- and post-processing,
+### Global Constants and Configurability
+
+The debugScene function shows how to configure the simulation world, there are a lot of interesting pa
+
+### Input/output syntax
+Command line args
+```
+./CS488.exe <resource path> -c <convergence> -i <max iterations>
+```
+
+All of the arguments are optional and have sensible default values.
+ - \<resource path\>: the relative path to the resources folder. defaults to "./resources".
+ - \<convergence\>: if this is 0, the program will not compute the convergence criterions. If it is 1 it will compute and print them to the console.
+ - \<max iterations\>: the maximum number of iteration to use in the VBD optimizer.
+
+Convergence criterions are as follow:
+ * grad loss: the normed energy gradient after an iteration. The goal of VBD is to minimize this quantity.  
+ * relative grad loss: grad loss from the current iteration over grad loss from the first iteration. The relative amount of grad loss that remains to be optimized. 
+ * abs change grad loss: The difference between grad loss in successive iterations.
+ * rel change grad loss: (current grad loss - previous grad loss) / previous grad loss. The relative improvement between iterations.
+ *  normed dx: The amount by which the iteration changed the vertex positions.
+ *  abs change dx: How much the above quantity changed between iterations.
+ *  rel change dx: Same as the above but relative to the norm of dx in the previous iteration.
 
 ### Acknowledgments
 
@@ -72,55 +122,58 @@ https://github.com/cjhoward/platonic-solids/blob/master/
 Also thank you to this math stack exchange for their 5-tet cube decomposition.
 https://math.stackexchange.com/questions/5145804/partitioning-a-cube-into-five-tetrahedra
 
-
 ## Summary of Objectives
 
 #### Objective 1: Basic Energy Formulation
 
-<!-- Define and solve the inertial energy terms for a set of points. Use the inertia and acceleration as an initial guess. -->
+This objective is done. The inertial energy contribution is determined using the formulas provided in the VBD paper.
 
-This objective is done.
+Code for this can be found in the ```World``` class in main.cpp
 
 #### Objective 2: Boundaries
+This objective is done. Correction forces are determined using the error energy formula provided in the VBD paper.
 
-<!-- Add a spring energy term to keep points above the world plane. Points should be pushed into the half space that lies in the direction of the plane’s normal. Generalize this so that the boundary can be defined by a set of planes. -->
-
-This objective is done.
+Code for this can be found in the ```World``` class in main.cpp
 
 #### Objective 3: Simple Softbody Models
 
-<!-- Define a single tetrahedron model and elastic material parameters. Add a material component to the VBD solver to keep the tetrahedron in its original shape. Define the elastic energy using a stable Neo-Hookean model and use finite differences to approximate the force and stiffness. -->
+This objective is done. The energy model is the same stable Neo-hookean model used in the VBD paper. Force and hessian are approximated using finite differencing. 
 
-This objective is done.
+Code for this can be found in the ```NeoHookenModel``` namespace in main.cpp
 
 #### Objective 4: Damping
 
-<!-- To oppose large velocities, add a Rayleigh damping force proportional to the stiffness.  -->
+This objective is done. A rayleigh damping force is proportional to the energy hessian is added according to the formula in the VBD paper. 
 
-This objective is done. (not sure if i want it to apply to collision but is okay either way)
-
+Code for this can be found in the ```World``` class in main.cpp
 
 #### Objective 5: Collision Detection and Resolution
 
-<!-- Define support functions for triangles and tetrahedra. Use GJK to find collisions between two triangle/tetrahedral meshes. Add a spring energy term to the solver based on the penetration distance.  -->
-
-
+This objective is not complete.
 
 #### Objective 6: Analytic Force and Energy-Hessian
 
-<!-- Compute the elastic force and energy hessian terms analytically. -->
+This objective is done. I use an FEM approach to solve for the force and hessian analytically. The method is given in detail in [l3].
 
-This objective is done. and i did an extra little material damping term for funsies i.g.
+Code for this can be found in the ```NeoHookenModel``` namespace in main.cpp
 
 #### Objective 7: Full Convergence
 
-<!-- Use the correct threshhold to allow the simulation to fully converge. Store per frame data and compare these results to the VBD solver to determine an adequate number of iterations for convergence. -->
+This objective is done. I compute various stopping criteria that describe the convergence of the system. The most important ones are the energy gradient, as this reaches 0 we are approaching a solution to the dynamics equations of the system. I also compute metrics about the change is dx (which each iteration is solving for).
 
+The data for this can be streamed into a file for processing and analysis.
+
+You may wish to run the simulation and pause around interesting key frames to inspect the data qualitatively.
+
+Code for this can be found in the ```World``` class in main.cpp
 
 #### Objective 8: Modeling and Stability Benchmarks
 
-<!-- Model scenes with several elastic bodies. Create graphs to demonstrate how the stability depends on scene geometry and simulation parameters. Confirm or refute anecdotal evidence about the stability of VBD being highly dependent on simulation parameters, and the optimal parameters being significantly different for different scenes. Draw conclusions about the viability of the algorithm for game physics. If it is not viable in its current form, identify areas of future work that could improve the algorithm. -->
+This objective is complete. I demonstrated several scenes with some well conditioned cases and several different failure cases. (See project description for more analysis).
 
+In my proposal, I stated that I would create some graphs of this data. However, I believe that this is not really a good way to represent my findings. Since my goal with this algorithm is to implement it into a game engine context, the visual results are far more important than the numeric ones. Several simple scenes have seemly high loss criterions (even when considered with respect to the number of vertices) but have good visual results. The number themselves also fail to capture how/why the algorithm fails which is also important. 
+
+I believe that any line/scatter plot diagrams I could make would need to cut out a lot of the data to be visually parsable (for example cherry picking certain frames) and this did not feel like a good way to represent my work and learning. I've opted instead to give more qualitative analysis (while referencing the simulation parameters and value ranges when appropriate) as I think these observations offer more insight into the algorithm. I've included the scenes that I used in my demo as a visual representation of that data.
 
 ## References 
 ### Literature References

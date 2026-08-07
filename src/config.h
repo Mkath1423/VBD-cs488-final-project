@@ -7,11 +7,15 @@ struct Config {
 	int height;
 	int width;
 	std::filesystem::path resources;
+	int convergence;
+	int max_iterations;
 
 	Config() : 
 		height{600}, 
 		width{800},
-		resources{"./resources"}
+		resources{"./resources"},
+		convergence{0},
+		max_iterations{ 50 }
 	{};
 };
 

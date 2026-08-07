@@ -128,7 +128,9 @@ struct Vertex {
     float3 position;
     float3 prevPosition;
     float3 velocity;
-    float mass;
+    float3 dx;
+    float3 prevDx;
+    float mass, radius;
 };
 
 struct PhysicsBody;
@@ -146,8 +148,10 @@ struct PhysicsConfig {
     float timestep;
     float3 a_ext;
     float tolerance;
-    int max_iterations;
+    int max_iterations; // unused
     float dampingFactor;
+    bool useCriterion; // unused
+    float collisionStiffness;
 };
 
 
@@ -345,7 +349,7 @@ public:
     }
 };
 
-namespace StandardNeoHookenModel {
+namespace NeoHookenModel {
 
     struct float9x9 {
         float data[81];
@@ -465,7 +469,7 @@ namespace StandardNeoHookenModel {
 
         float3x3 dPhidxdx;
         
-        // this exploits the sparity of the dFdx matrix...
+        // this exploits the sparity of the dFdx tensor...
         // ...but at a small cost
         // have fun reading that one!
         for (size_t row = 0; row < 3; ++row) {
@@ -487,7 +491,6 @@ namespace StandardNeoHookenModel {
                     (vecdFdx ^ T * dPhidFdF)[row, 0 + col] * dFdx[0]+ 
                     (vecdFdx ^ T * dPhidFdF)[row, 3 + col] * dFdx[1]+ 
                     (vecdFdx ^ T * dPhidFdF)[row, 6 + col] * dFdx[2]
-                
                 */
 
                 dPhidxdx[col][row] =
@@ -551,7 +554,7 @@ struct DeformationForceElement : public ForceElement {
 
         switch (energy_model) {
         case EnergyModel::StableNeoHookeanNoLog:
-            return StandardNeoHookenModel::energy(F, mu, lambda, ele.rest_volume);
+            return NeoHookenModel::energy(F, mu, lambda, ele.rest_volume);
         default:
             return 0;
         }
@@ -677,7 +680,7 @@ struct DeformationForceElement : public ForceElement {
 
             switch (energy_model) {
             case EnergyModel::StableNeoHookeanNoLog:
-                StandardNeoHookenModel::forceAndHessian(vertexInTet, Dminv, F, mu, lambda, ele.rest_volume, f, H, hydrostaticDamping, deviatoricDamping, 1.0/60.0, displacement);
+                NeoHookenModel::forceAndHessian(vertexInTet, Dminv, F, mu, lambda, ele.rest_volume, f, H, hydrostaticDamping, deviatoricDamping, 1.0/60.0, displacement);
                 return;
             default:
                 return;
@@ -746,6 +749,7 @@ void createSoftBody(const SoftBody& config, std::shared_ptr<Entity> entity, floa
         // each vertex gets a quarter of the adjacent mass
         //v.mass = density * (0.25 * volume);
         v.mass = config.mass / config.mesh->num_vertices;
+        v.radius = 0.0;
 
         entity->body->vertices.emplace_back(v);
     }
@@ -788,7 +792,7 @@ struct World {
 public:
     void stepPhysics(float timestep) {
 
-        float stiffness = 1e+5;
+        float stiffness = physics.collisionStiffness;
         float3 planeoff(0.0, -1.0, 0.0);
         float3 planen(0.0, 1.0, 0.0);
 
@@ -808,11 +812,17 @@ public:
             }
         }
 
-        int it = 0;
-        float criterion;
-        float firstCriterion;
-        while(true) {
-            criterion = 0;
+        float firstLoss = 0; // relative loss
+        float lastLoss = 0; // change in loss between frames
+
+        float firstNormDx = 0;
+        float lastNormDx = 0; 
+
+        if (config.convergence) {
+            printf("[Physics] frame start\n");
+        }
+
+        for (int it = 0; it < config.max_iterations; ++it) {
                 
             // do a collision update
 
@@ -836,7 +846,7 @@ public:
                     // apply a collision constraint
 
                     float pen;
-                    collide_sphere_plane(0.5f, v.position, planeoff, planen, pen);
+                    collide_sphere_plane(v.radius, v.position, planeoff, planen, pen);
                 
                     if (pen > 0) {
                         f -= collision_force(-1, stiffness, pen, planen);
@@ -857,32 +867,101 @@ public:
 
 
                     float3 dx = solveHouseholderQR(hessian, force);
-                    if (length(dx) > 1) {
-                        printf("length(dx)=  %f\n", length(dx));
-                        printf("H = I[%f %f %f]^T\n", H.x, H.y, H.z); 
-                    }
-
-
-                    // float3 dx = float3(f.x/H.x, f.y/H.y, f.z/H.z);
+                    
+                    v.prevDx = v.dx;
+                    v.dx = dx;
                     v.position += dx;
                 }
             }
 
-            if (it == 0) firstCriterion = criterion;
+            // the vbd implementaion also computes the "merit energy" = elastic + inertial energy
+            // this quanitity is not very physically meaningful on its own, only its gradient is useful for the optimization
+            // zero gradients of the energy function correspond to roots of the dynamics equations
+            // so we use the norm of the gradient to measure the loss (which vbd does)
+            // we can derive the relative loss per iteration using this, which vbd uses for performance benchmarks
+            // (also note that normed force == normed energy gradient)
+            // we also need to wait untill everything has been updated before calculating the loss
+            // intermediate results will affect this
+            if (config.convergence) {
 
-            ++it;
 
-            // stop after a max number of iterations
-            if (physics.max_iterations > 0 && it >= physics.max_iterations) break;
 
-            // stop at an absolute error
-            // always run at least once otherwise we dont have the current error
-            //if (it != 0 && criterion < physics.tolerance * physics.tolerance * firstCriterion) break;
-            // printf("[Physics] iteration %d residual %3.6f\n", it, std::sqrt(criterion));
+
+                float normedDxDiff = 0; // absolute change
+                float normedDxCur = 0; // for computing the relative change between iterations
+                float normedForce = 0; // gradient criterion
+
+                // we have to recompute everything... :(
+                for (auto* body : bodies) {
+                    for (unsigned int vidx = 0; vidx < body->vertices.size(); ++vidx) {
+                        auto& v = body->vertices[vidx];
+
+                        normedDxDiff += length2(v.dx - v.prevDx);
+                        normedDxCur += length2(v.dx);
+
+                        float3 y = v.prevPosition + timestep * v.velocity + timestep * timestep * physics.a_ext;
+                        float3 finertia = -v.mass * (v.position - y) / (timestep * timestep);
+                        float3 f(0.0);
+                        float3x3 H(0.0);
+
+                        // TODO: replace this with the actual collision data
+                        float pen;
+                        collide_sphere_plane(0.5f, v.position, planeoff, planen, pen);
+
+                        if (pen > 0) {
+                            f -= collision_force(-1, stiffness, pen, planen);
+                            H += collision_hessian(-1, stiffness, pen, planen);
+                        }
+
+                        // compute body forces
+                        for (auto& force : body->forces) {
+                            if (force) force->add_force_and_hessian(vidx, f, H);
+                        }
+
+                        float3x3 rayleighDamping = (physics.dampingFactor / timestep) * H;
+                        float3 force = finertia + f - mul(rayleighDamping, (v.position - v.prevPosition));
+
+                        normedForce += dot(force, force);
+                    }
+                }
+
+                normedDxDiff = sqrt(normedDxDiff);
+                normedDxCur = sqrt(normedDxCur);
+
+                normedForce = sqrt(normedForce);
+
+
+                if (it % 10 == 0) {
+                    if (it != 0) {
+                        printf("[Physics] it: %d; grad loss: %3.6f; relative grad loss: %3.6f; abs change grad loss: %3.6f; rel change grad loss: %3.6f ", 
+                            it, normedForce, normedForce / firstLoss, abs(normedForce - lastLoss), (normedForce - lastLoss) / (lastLoss + 1e-8));
+                        printf(" normed dx: %3.6f; abs change dx: %3.6f; rel change dx: %3.6f\n", normedDxCur, normedDxDiff, normedDxDiff / (lastNormDx + 1e-8));
+                    }
+                    else {
+                        printf("[Physics] it: %d; grad loss: %3.6f; ", it, normedForce);
+                        printf(" normed dx: %3.6f;\n", normedDxCur);
+
+                    }
+
+                }
+
+                if (it == 0) {
+                    firstNormDx = normedDxCur;
+                    firstLoss = normedForce;
+                }
+
+                lastLoss = normedForce;
+                lastNormDx = normedDxCur;
+
+
+                // stop at an relative loss threashold error
+                // always run at least once otherwise we dont have the current error
+                //if (it != 0 && criterion < physics.tolerance * physics.tolerance * firstCriterion) break;
+            }
 
         }
 
-        printf("[Physics] step took %d iterations ending with %3.6f error\n", it, std::sqrt(criterion));
+        // printf("[Physics] step took %d iterations ending with %3.6f error\n", it, std::sqrt(criterion));
 
         //e_tet->body->vertices[0].position = e_tet->body->vertices[0].prevPosition;
 
@@ -916,11 +995,11 @@ public:
 
 
 
-
-size_t num_scenes = 1;
+bool debugging = true;
+int num_scenes = 3;
 bool stopSimulation = false;
 bool simPaused = false;
-size_t current_world = 0;
+int current_world = 0;
 
 bool keyBuffer[GLFW_KEY_LAST];
 
@@ -1057,12 +1136,23 @@ Camera build_default_camera() {
     return c;
 }
 
+/*
+xtream level!
+softbody_config.mass = 50000;
+
+    softbody_config.mu = 1e9;
+    softbody_config.lambda = 1e9f;
+    softbody_config.deviatoricDamping = 1e-6;
+    softbody_config.hydrostaticDamping = 0; //1e-4;
+    physics.collisionStiffness = 1e+9;
+
+*/
 SoftBody build_default_softbody() {
     SoftBody softbody_config;
     softbody_config.offset = float3(0.0, 5.0, 0.0);
     softbody_config.scale = float3(1.0f);
 
-    softbody_config.mesh = tet_cube;
+    softbody_config.mesh = single_tet;
     softbody_config.shader = defaultShader;
     softbody_config.color = float3(1.0f, 0.1f, 0.4f);
 
@@ -1070,15 +1160,87 @@ SoftBody build_default_softbody() {
     softbody_config.differentiation_mode = ElasticEnergyDifferentiationMode::Analytical;
     softbody_config.mass = 50;
 
-    softbody_config.mu = 1e5;
-    softbody_config.lambda = 1e5f;
+    softbody_config.mu = 1e4;
+    softbody_config.lambda = 1e5;
     softbody_config.deviatoricDamping = 1e-6;
-    softbody_config.hydrostaticDamping = 0; //1e-4;
+    softbody_config.hydrostaticDamping = 0; 1e-6;
 
     return softbody_config;
 }
 
 World debugScene() {
+
+    std::vector<std::shared_ptr<Entity>> entities;
+    Camera camera = build_default_camera();
+    PhysicsConfig physics;
+    std::vector<std::unique_ptr<RenderProxy>> staticRenderers;
+
+    float particle_radius = 0.5;
+
+    staticRenderers.emplace_back(std::make_unique<StaticRenderProxy>(defaultShader, plane, float3(0.5), float3(0.0, -1.0, 0.0)));
+
+
+    // particle system
+    Particles particle_config;
+    particle_config.radius = 0.5;
+    particle_config.mass = 1.0;
+    particle_config.mesh = sphereParticle;
+    particle_config.shader = defaultShader;
+
+    auto n_vertices = 10;
+    for (int i = 0; i < n_vertices; ++i) {
+        particle_config.positions.emplace_back(i, 1.0f, i);
+        particle_config.velocities.emplace_back(0.0f, 5.0 * i + 2.0, 0.0f);
+    }
+
+    std::shared_ptr<Entity> e_particles = std::make_shared<Entity>();
+    e_particles->drawer = std::move(std::make_unique<ParticleRenderProxy>(particle_config, e_particles));
+    e_particles->body = std::move(std::make_unique<PhysicsBody>());
+
+
+    for (int i = 0; i < n_vertices; ++i) {
+        Vertex v;
+        v.prevPosition = particle_config.positions[i];
+        v.velocity = particle_config.velocities[i];
+        v.mass = particle_config.mass;
+        v.radius = particle_config.radius;
+
+        e_particles->body->vertices.emplace_back(v);
+    }
+
+    // soft body 
+    std::shared_ptr<Entity> e_tet = std::make_shared<Entity>();
+    createSoftBody(build_default_softbody(), e_tet);
+
+
+    // Physics System configuration
+
+    physics.a_ext = float3(0.0, -9.8, 0.0);
+    physics.timestep = 1.0 / 60.0;
+    physics.tolerance = 1e-3;
+    physics.max_iterations = 50;
+    physics.dampingFactor = 1e-6;
+    physics.useCriterion = false;
+    physics.collisionStiffness = 1e+5;
+
+    entities.push_back(e_particles);
+    entities.push_back(e_tet);
+
+    return World(physics, camera, entities, std::move(staticRenderers));
+}
+
+/// DEMO SCENES
+///  1) Basic particles and plane
+///  2) finite differnces tet model
+///  3) Analytical tet model
+///  4) rayleigh damping
+///  5) performance benchmarks (used for data capture)
+///   5a) normal
+///   5b) self collapse failure
+///   5c) cube collision failure
+///   5d) particle collision failure (but cube is ok)
+
+World demo1() {
 
     std::vector<std::shared_ptr<Entity>> entities;
     Camera camera = build_default_camera();
@@ -1111,13 +1273,10 @@ World debugScene() {
         v.prevPosition = particle_config.positions[i];
         v.velocity = particle_config.velocities[i];
         v.mass = particle_config.mass;
+        v.radius = particle_config.radius;
 
         e_particles->body->vertices.emplace_back(v);
     }
-
-    // soft body 
-    std::shared_ptr<Entity> e_tet = std::make_shared<Entity>();
-    createSoftBody(build_default_softbody(), e_tet);
 
 
     // Physics System configuration
@@ -1126,17 +1285,137 @@ World debugScene() {
     physics.timestep = 1.0 / 60.0;
     physics.tolerance = 1e-3;
     physics.max_iterations = 50;
-    physics.dampingFactor = 1e-6;
+    physics.dampingFactor = 0;
+    physics.useCriterion = false;
+    physics.collisionStiffness = 1e+5;
 
     entities.push_back(e_particles);
-    entities.push_back(e_tet);
 
+    return World(physics, camera, entities, std::move(staticRenderers));
+}
+
+
+World demo234(ElasticEnergyDifferentiationMode mode, float damping=0.0) {
+
+    std::vector<std::shared_ptr<Entity>> entities;
+    Camera camera = build_default_camera();
+    camera.origin = float3(0.0, 1.0, 6.0);
+
+
+    PhysicsConfig physics;
+    std::vector<std::unique_ptr<RenderProxy>> staticRenderers;
+
+    staticRenderers.emplace_back(std::make_unique<StaticRenderProxy>(defaultShader, plane, float3(0.5), float3(0.0, -1.0, 0.0)));
+
+
+   // soft body 
+    SoftBody softbody_config = build_default_softbody();
+    softbody_config.differentiation_mode = mode;
+    softbody_config.offset = float3(-1.0, 1.5, 0.0);
+    std::shared_ptr<Entity> e_tet = std::make_shared<Entity>();
+    createSoftBody(softbody_config, e_tet);
+
+
+    SoftBody softbody_config2 = build_default_softbody();
+    softbody_config2.differentiation_mode = mode;
+    softbody_config2.mu = 1e6;
+    softbody_config2.lambda = 1e6;
+    softbody_config2.offset = float3(1.0, 1.5, 0.0);
+    std::shared_ptr<Entity> e_tet2 = std::make_shared<Entity>();
+    createSoftBody(softbody_config2, e_tet2);
+
+
+
+    // Physics System configuration
+    physics.a_ext = float3(0.0, -9.8, 0.0);
+    physics.timestep = 1.0 / 60.0;
+    physics.tolerance = 1e-3;
+    physics.max_iterations = 50;
+    physics.dampingFactor = damping;
+    physics.useCriterion = false;
+    physics.collisionStiffness = 1e+5;
+
+    entities.push_back(e_tet);
+    entities.push_back(e_tet2);
+    return World(physics, camera, entities, std::move(staticRenderers));
+}
+
+// performance worlds
+World demo5(float mass, float mat_stiffness, float collision_stiffness, bool particles=false) {
+
+    std::vector<std::shared_ptr<Entity>> entities;
+    Camera camera = build_default_camera();
+    camera.origin = float3(0.0, 8.0, -15.0);
+
+
+    PhysicsConfig physics;
+    std::vector<std::unique_ptr<RenderProxy>> staticRenderers;
+
+    staticRenderers.emplace_back(std::make_unique<StaticRenderProxy>(defaultShader, plane, float3(0.5), float3(0.0, -1.0, 0.0)));
+    
+    // particle system
+    if (particles) {
+
+        Particles particle_config;
+        particle_config.radius = 0.5;
+        particle_config.mass = 1.0;
+        particle_config.mesh = sphereParticle;
+        particle_config.shader = defaultShader;
+
+        auto n_vertices = 10;
+        for (int i = 0; i < n_vertices; ++i) {
+            particle_config.positions.emplace_back(i + 1, 1.0f, i);
+            particle_config.velocities.emplace_back(0.0f, 5.0 * i + 2.0, 0.0f);
+        }
+
+        std::shared_ptr<Entity> e_particles = std::make_shared<Entity>();
+        e_particles->drawer = std::move(std::make_unique<ParticleRenderProxy>(particle_config, e_particles));
+        e_particles->body = std::move(std::make_unique<PhysicsBody>());
+
+        for (int i = 0; i < n_vertices; ++i) {
+            Vertex v;
+            v.prevPosition = particle_config.positions[i];
+            v.velocity = particle_config.velocities[i];
+            v.mass = particle_config.mass;
+            v.radius = particle_config.radius;
+
+            e_particles->body->vertices.emplace_back(v);
+        }
+        entities.push_back(e_particles);
+
+    }
+
+    // soft body 
+    SoftBody softbody_config = build_default_softbody();
+    softbody_config.differentiation_mode = Analytical;
+    softbody_config.mesh = tet_cube;
+    softbody_config.mass = mass;
+    softbody_config.mu = mat_stiffness;
+    softbody_config.lambda = mat_stiffness;
+    if (particles) softbody_config.offset += float3(-1.0f, 0.0, 0.0);
+    std::shared_ptr<Entity> e_tet = std::make_shared<Entity>();
+    createSoftBody(softbody_config, e_tet);
+
+
+
+    // Physics System configuration
+    physics.a_ext = float3(0.0, -9.8, 0.0);
+    physics.timestep = 1.0 / 60.0;
+    physics.tolerance = 1e-3;
+    physics.max_iterations = 50;
+    physics.dampingFactor = 1e-6;
+    physics.useCriterion = false;
+    physics.collisionStiffness = collision_stiffness;
+
+    entities.push_back(e_tet);
     return World(physics, camera, entities, std::move(staticRenderers));
 }
 
 int main(int argc, char *argv[])
 {
-
+    num_scenes = 10;
+    debugging = false;
+    current_world = 0;
     config = parse_args(argc, argv);
 
     window = setup_window();
@@ -1146,12 +1425,23 @@ int main(int argc, char *argv[])
         printf("starting world %d...\n", current_world);
         stopSimulation = false;
         simPaused = true;
-        // todo: switch on which world to run
-        //run(builders[current_world].build(globalRenderer));
-        run(debugScene());
+        if (debugging) run(debugScene());
+        else if (current_world == 0) run(demo1());
+        else if (current_world == 1) run(demo234(ElasticEnergyDifferentiationMode::FiniteDifferences));
+        else if (current_world == 2) run(demo234(ElasticEnergyDifferentiationMode::Analytical));
+        else if (current_world == 3) run(demo234(ElasticEnergyDifferentiationMode::Analytical, 1e-6));
+        else if (current_world == 4) run(demo234(ElasticEnergyDifferentiationMode::Analytical, 5e-5));
+        else if (current_world == 5) run(demo234(ElasticEnergyDifferentiationMode::Analytical, 10e-5));
+        else if (current_world == 6) run(demo5(50, 5e3, 1e5, true));
+        else if (current_world == 7) run(demo5(5000, 1e4, 1e5, true));
+        else if (current_world == 8) run(demo5(50000, 1e9, 1e5, true));
+        else if (current_world == 9) run(demo5(50000, 1e9, 1e9, true));
+        else {
+            printf("%d is not a valid world selection! going to debug!\n", current_world); 
+            run(debugScene());
+        }
 
         printf("resetting world...\n");
-
     }
     
     glfwTerminate();
@@ -1171,20 +1461,33 @@ void key_callback(GLFWwindow* window, int key, int scancode, int action, int mod
 
     if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS)
         glfwSetWindowShouldClose(window, GL_TRUE);
-    if (key == GLFW_KEY_LEFT && action == GLFW_PRESS) {
-        stopSimulation = true;
-        current_world = std::min(current_world + 1, num_scenes- 1);
-    }
-    if (key == GLFW_KEY_RIGHT && action == GLFW_PRESS) {
-        stopSimulation = true;
-        current_world = std::max(current_world - 1, 0ull);
-    }
+
+
+    
     if (key == GLFW_KEY_R && action == GLFW_PRESS) {
         stopSimulation = true;
     }
     if (key == GLFW_KEY_P && action == GLFW_PRESS) {
         simPaused = !simPaused;
     }
+
+    if (key == GLFW_KEY_K && action == GLFW_PRESS) {
+        stopSimulation = true;
+        debugging = !debugging;
+        if (!debugging) current_world = 0;
+    }
+
+    if (!debugging) {
+        if (key == GLFW_KEY_LEFT && action == GLFW_PRESS) {
+            stopSimulation = true;
+            current_world = std::max(0, std::min(current_world - 1, num_scenes - 1));
+        }
+        if (key == GLFW_KEY_RIGHT && action == GLFW_PRESS) {
+            stopSimulation = true;
+            current_world = std::max(0, std::min(current_world + 1, num_scenes - 1));
+        }
+    }
+
 }
 
 void mouse_button_callback(GLFWwindow* window, int button, int action, int mods) {
@@ -1192,149 +1495,6 @@ void mouse_button_callback(GLFWwindow* window, int button, int action, int mods)
 }
 
 
-// mouse button events (you do not need to modify it unless you want to)
 void cursor_pos_callback(GLFWwindow* window, double mouse_x, double mouse_y) {
 	
 }
-
-/*
-class Physics
-
-
-class SimulationObject {
-    virtual inertialComponent() = default
-
-    virtual constraintComponent() = 0
-        different types of bodies will expect different types of collision results (i believe)
-        maybe split this up into several cases
-
-    virtual bodyComponent() = do nothing
-
-    virtual draw() = do nothing
-}
-
-class Particle : SimO {
-    one physics vertex
-
-    has a radius
-    has a shared ptr to mesh and shared ptr to shader
-}
-
-class ElasticBody : SimO {
-    has many vertices
-    has boundary face indices
-    has element indices 
-
-    tracks which vertices and elements are on the boundary
-    tracks which elements belong to each vertex
-    tracks which elements should not collide with each other (i.e. neighbors)
-    boundary tets also track which face is the boundary (i.e. which vertex is not a boundary)
-}
-
-class PhysicsSystem {
-    has references to all the bodies
-
-    generate constraints and contacts
-        build acceleration structure    
-
-        sweep for possible interation // or do all pairs
-            for a possible interation
-                go to the interaction case
-
-        particle particle
-            radius test
-        
-        particle plane
-            radius test
-
-            
-        particle plane
-            radius test
-
-        particle boundary-mesh-face
-            ...
-
-
-        // for the elastic meshes
-
-        vertex face 
-            same as the previous actually
-
-        edge edge
-            ???
-
-
-        vertex boundary-plane
-            same as vertex face basically
-
-        // scratch the below
-        particle boundary-tet
-            test against boundary face
-
-        boundary-tet boundary-tet
-            check if they should be masked
-            use GJK to find initial simplex
-            use EPA to find the supporting simplex on each tet
-            this tells us if we have a p-f or e-e collision
-
-            store a contact on either the p e or f
-             * also check if the contact has already been generated
-             * several tets can have a vertex A, 
-               * if A is contacting face B then it will be doing so in several tets
-             * not sure if there is a way to avoid that extra work 
-            
-
-            need the barycentric coordinates (at least one will be 0)
-             * we can write the provided energy term as a function of the tet vertices
-             * then we can differentiate wrt each vertex
-
-        boundary-tet plane
-            
-
-        
-        for every particle
-            test against every particle
-             * generate: ParticleParticle p1 p2
-            test every particle against the faces of every elastic
-            test against the faces of every static
-            test against plane primatives
-
-
-
-
-    step()
-        determine constraints on all the physics vertices
-         * contact
-         * boundaries 
-        
-        until converged or stop
-          for every body
-            for every vertex
-                create initial guess
-
-          for every body 
-            for every vertex
-                build f and H using
-
-        steps the physics
-
-}
-
-class Simulation {
-    init()
-        create all the objects in the world
-        configure a physics system and register things with that
-
-        load all the shaders and file resources that it needs
-
-        setup rendering information when building the various scene objects
-
-    stepPhysics()
-        invoke the physics system
-
-    draw()
-        for every sim object
-
-}
-
-*/
