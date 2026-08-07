@@ -127,9 +127,11 @@ struct StaticTriangleMesh : public SharableResource<StaticTriangleMesh> {
 
     const std::filesystem::path objFile;
 
+    float radius;
+
     TriangleMeshFileData mesh;
     
-    StaticTriangleMesh(std::filesystem::path objFile) : objFile{objFile} {
+    StaticTriangleMesh(std::filesystem::path objFile, float radius = -1) : objFile{ objFile }, radius{ radius } {
 
     }
 
@@ -139,12 +141,45 @@ struct StaticTriangleMesh : public SharableResource<StaticTriangleMesh> {
             return false;
         }
 
+        if (radius > 0) {
+            float3 center;
+            for (int i = 0; i < mesh.positions.size(); i += 3) {
+                center += float3(
+                    mesh.positions[i + 0], 
+                    mesh.positions[i + 1], 
+                    mesh.positions[i + 2]);
+            }
+
+            float maxDist = 0;
+            for (int i = 0; i < mesh.positions.size(); i += 3) {
+                maxDist = std::max(
+                    maxDist, 
+                    length(float3(
+                        mesh.positions[i + 0],
+                        mesh.positions[i + 1],
+                        mesh.positions[i + 2]) - center));
+            }
+
+            for (int i = 0; i < mesh.positions.size(); i += 3) {
+                float3 pos = float3(
+                    mesh.positions[i + 0],
+                    mesh.positions[i + 1],
+                    mesh.positions[i + 2]);
+                pos = (radius / maxDist) * (pos - center) + center;
+                mesh.positions[i + 0] = pos.x;
+                mesh.positions[i + 1] = pos.y;
+                mesh.positions[i + 2] = pos.z;
+            }
+        }
+
         renderMesh.buffer_data(
             mesh.positions.data(), mesh.positions.size(), 
             mesh.faces.data(), mesh.faces.size());
         
         return true;
     }
+
+    
     
     ~StaticTriangleMesh() {
         if (initialized) {

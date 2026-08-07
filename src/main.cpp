@@ -26,6 +26,7 @@ void cursor_pos_callback(GLFWwindow* window, double mouse_x, double mouse_y);
 
 Config config;
 GLFWwindow* window;
+//Renderer globalRenderer;
 
 GLFWwindow *setup_window(){
     if (!glfwInit()) {
@@ -68,6 +69,8 @@ GLFWwindow *setup_window(){
 
     glEnable(GL_DEPTH_TEST);
     glDepthFunc(GL_LESS);
+
+    glDisable(GL_CULL_FACE);
 
     return window;
 }
@@ -142,6 +145,9 @@ struct PhysicsBody {
 struct PhysicsConfig {
     float timestep;
     float3 a_ext;
+    float tolerance;
+    int max_iterations;
+    float dampingFactor;
 };
 
 
@@ -156,25 +162,6 @@ struct Entity {
 
 
 
-Camera build_default_camera() {
-    Camera c;
-
-    c.origin = { 0.0, 5.0, -20 };
-    c.poi = { 0.0, 5.0, 0.0 };
-    c.up = { 0.0, 1.0, 0.0 };
-
-    float globalAspectRatio = float(config.width) / float(config.height);
-    float globalFOV = 45.0f; // vertical field of view
-    float globalDepthMin = 5.0E-02; // for rasterization
-    float globalDepthMax = 100.0f; // for rasterization
-
-    c.aspect = globalAspectRatio;
-    c.fovy = globalFOV;
-    c.zNear = globalDepthMin;
-    c.zFar = globalDepthMax;
-
-    return c;
-}
 
 struct Particles {
     std::vector<float3> positions;
@@ -183,6 +170,7 @@ struct Particles {
     std::shared_ptr<StaticTriangleMesh> mesh;
     std::shared_ptr<Shader> shader;
     float radius, mass;
+    float3 color = float3(1.0f, 0.1f, 0.4f);
 };
 
 
@@ -192,6 +180,7 @@ class ParticleRenderProxy : public RenderProxy {
     std::shared_ptr<Shader> shader;
     std::shared_ptr<StaticTriangleMesh> mesh;
     float radius;
+    float3 color;
 
     // synced state
     std::vector<float3> positions;
@@ -203,7 +192,8 @@ public:
         w_entity{ std::move(_entity) },
         shader{ config.shader },
         mesh{ config.mesh },
-        radius{ config.radius } {
+        radius{ config.radius },
+        color{ config.color }  {
     }
 
     void sync() override {
@@ -224,20 +214,53 @@ public:
 
             for (auto& p : positions) {
                 float4x4 modelMat = linalg::identity;
-                modelMat *= radius;
+                //modelMat *= radius;
                 modelMat.w = float4(p.x, p.y, p.z, 1.0);
 
                 renderer.setTransform(modelMat);
+                renderer.setColor(color);
                 mesh->draw();
             }
         }
     }
 };
 
+class StaticRenderProxy : public RenderProxy {
+
+    // config parameters
+    std::shared_ptr<Shader> shader;
+    std::shared_ptr<StaticTriangleMesh> mesh;
+    float3 color;
+    float3 offset;
+
+    std::weak_ptr<Entity> w_entity;
+
+public:
+    StaticRenderProxy(std::shared_ptr<Shader> shader, std::shared_ptr<StaticTriangleMesh> mesh, float3 color, float3 offset) :
+        shader{ shader},
+        mesh{ mesh },
+        color{ color },
+        offset{ offset } {
+    }
+
+    void sync() override { }
+
+    void draw(Renderer& renderer) override {
+        auto entity = w_entity.lock();
+        renderer.setShader(shader);
+
+        float4x4 modelMat = linalg::identity;
+        modelMat.w = float4(offset, 1.0);
+        renderer.setTransform(modelMat);
+        renderer.setColor(color);
+        mesh->draw();
+    }
+};
+
 enum EnergyModel {
     None,
-    StandardNeoHookean,
     StableNeoHookeanNoLog,
+    AlphaOneNeoHookean,
     StableNeoHookean,
 } ;
 
@@ -252,13 +275,14 @@ struct SoftBody {
 
     std::shared_ptr<TetrahedraMesh> mesh;
     std::shared_ptr<Shader> shader;
+    float3 color = float3(1.0f, 0.1f, 0.4f);
     
     float mass;
     EnergyModel energy_model;
     ElasticEnergyDifferentiationMode differentiation_mode;
 
 
-    float mu, lambda;
+    float mu, lambda, hydrostaticDamping, deviatoricDamping;
 
    /* static void create(SoftBody& config, std::shared_ptr<Entity> e) {
 
@@ -272,6 +296,7 @@ class SoftBodyRenderProxy : public RenderProxy {
     // config parameters
     std::shared_ptr<Shader> shader;
     std::shared_ptr<TetrahedraMesh> mesh;
+    float3 color;
 
     // synced state
     std::vector<float3> positions;
@@ -279,10 +304,11 @@ class SoftBodyRenderProxy : public RenderProxy {
     std::weak_ptr<Entity> w_entity;
 
 public:
-    SoftBodyRenderProxy(SoftBody& config, std::weak_ptr<Entity> _entity) :
+    SoftBodyRenderProxy(const SoftBody& config, std::weak_ptr<Entity> _entity) :
         w_entity{ std::move(_entity) },
         shader{ config.shader },
-        mesh{ config.mesh } {
+        mesh{ config.mesh },
+        color{ config.color } {
 
         renderMesh.buffer_elements(
             mesh->fileData.faces.data(), 
@@ -298,8 +324,8 @@ public:
 
             for (const auto& v : entity->body->vertices) {
                 vertex_buffer.emplace_back(v.prevPosition.x);
-                vertex_buffer.push_back(v.prevPosition.y);
-                vertex_buffer.push_back(v.prevPosition.z);
+                vertex_buffer.emplace_back(v.prevPosition.y);
+                vertex_buffer.emplace_back(v.prevPosition.z);
             }
 
             renderMesh.buffer_vertices(
@@ -313,6 +339,7 @@ public:
             renderer.setShader(shader);
             float4x4 I = linalg::identity;
             renderer.setTransform(I);
+            renderer.setColor(color);
             renderMesh.draw_triangles();
         }
     }
@@ -334,14 +361,14 @@ namespace StandardNeoHookenModel {
         float J = linalg::determinant(F);
 
         float Ic = linalg::trace(mul(linalg::transpose(F), F));
-        float phi = 0.5 * mu * (Ic - 3) + 0.5 * lambda * std::pow((J - 1), 2.0);
+        float phi = 0.5 * mu * (Ic - 3) + 0.5 * lambda * std::pow((J - 1 - mu / lambda), 2.0);
 
         float E = restVolume * phi;
         return E;
     }
 
 
-    static void forceAndHessian(unsigned int vertexIndex, const float3x3 &Dminv, const float3x3 &F, const float mu, const float lambda, float restVolume, float3 &force, float3x3 &hessian) {
+    static void forceAndHessian(unsigned int vertexIndex, const float3x3 &Dminv, const float3x3 &F, const float mu, const float lambda, float restVolume, float3 &force, float3x3 &hessian, const float deviatoricDamping, const float hydrostaticDamping, float timestep, float3 displacement) {
 
         // Force
         
@@ -353,7 +380,7 @@ namespace StandardNeoHookenModel {
         dJdF[1] = cross(F[2], F[0]);
         dJdF[2] = cross(F[0], F[1]);
 
-        float3x3 dEdF = restVolume * (mu * F + lambda * (J - 1) * dJdF);
+        float3x3 dEdF = restVolume * (mu * F + lambda * (J - 1 - mu / lambda) * dJdF);
 
         // derivative of deformation gradient w.r.t. vertex position
         float3 dFdx;
@@ -378,7 +405,6 @@ namespace StandardNeoHookenModel {
             dEdx[i] = dFdx[0] * dEdF[0][i] + dFdx[1] * dEdF[1][i] + dFdx[2] * dEdF[2][i];
         }
 
-        force += -dEdx;
 
         // Hessian
         // this uses dense 9x9 matrices which represent flattened 4th order tensors
@@ -471,15 +497,29 @@ namespace StandardNeoHookenModel {
             }
         }
 
-        // i lied this is actually the energy not the energy density :)
-        hessian += dPhidxdx;
+        // referenced from the GAIA codebase
+        float3x3 damping = dPhidxdx * hydrostaticDamping;
 
+        float tmp = dot(dFdx, dFdx) * mu * restVolume * deviatoricDamping;
+        damping[0][0] += tmp;
+        damping[1][1] += tmp;
+        damping[2][2] += tmp;
+        damping /= timestep;
+
+        float3 rayleighForce = mul(damping, displacement);
+
+
+        // i lied dPhidxdx is actually the energy hessian not the energy density hessian :)
+        force -= dEdx + rayleighForce;
+        hessian += dPhidxdx + damping;
     }
 };
 
+
+
 struct DeformationForceElement : public ForceElement {
     // config parameters
-    float mu, lambda;
+    float mu, lambda, hydrostaticDamping, deviatoricDamping;
     std::shared_ptr<TetrahedraMesh> mesh;
     float3 scale;
     EnergyModel energy_model;
@@ -510,7 +550,7 @@ struct DeformationForceElement : public ForceElement {
         auto F = deformationGradient(ele, positions);
 
         switch (energy_model) {
-        case EnergyModel::StandardNeoHookean:
+        case EnergyModel::StableNeoHookeanNoLog:
             return StandardNeoHookenModel::energy(F, mu, lambda, ele.rest_volume);
         default:
             return 0;
@@ -633,10 +673,11 @@ struct DeformationForceElement : public ForceElement {
             Dminv[1] /= scale[1];
             Dminv[2] /= scale[2];
 
+            float3 displacement = body.vertices[vertex].position - body.vertices[vertex].prevPosition;
 
             switch (energy_model) {
-            case EnergyModel::StandardNeoHookean:
-                StandardNeoHookenModel::forceAndHessian(vertexInTet, Dminv, F, mu, lambda, ele.rest_volume, f, H);
+            case EnergyModel::StableNeoHookeanNoLog:
+                StandardNeoHookenModel::forceAndHessian(vertexInTet, Dminv, F, mu, lambda, ele.rest_volume, f, H, hydrostaticDamping, deviatoricDamping, 1.0/60.0, displacement);
                 return;
             default:
                 return;
@@ -646,15 +687,19 @@ struct DeformationForceElement : public ForceElement {
     }
 
 public:
-    DeformationForceElement(SoftBody& config, std::weak_ptr<Entity> _entity) :
+    DeformationForceElement(const SoftBody& config, std::weak_ptr<Entity> _entity) :
         w_entity{ std::move(_entity) },
         mesh{ config.mesh },
         scale{ config.scale },
         mu{ config.mu },
         lambda{ config.lambda },
         energy_model{ config.energy_model },
-        differentiation_mode{ config.differentiation_mode } {
+        differentiation_mode{ config.differentiation_mode },
+        hydrostaticDamping{ config.hydrostaticDamping },
+        deviatoricDamping{ config.deviatoricDamping } {
     }
+
+
     
 
     void add_force_and_hessian(unsigned int vertex_id, float3& f, float3x3& H) override {
@@ -671,7 +716,7 @@ public:
     }
 };
 
-void createSoftBody(SoftBody& config, std::shared_ptr<Entity> entity) {
+void createSoftBody(const SoftBody& config, std::shared_ptr<Entity> entity, float3 inflate = float3(0.0)) {
     entity->drawer = std::move(std::make_unique<SoftBodyRenderProxy>(config, entity));
     entity->body = std::move(std::make_unique<PhysicsBody>());
 
@@ -685,7 +730,7 @@ void createSoftBody(SoftBody& config, std::shared_ptr<Entity> entity) {
         float3 pos = config.mesh->position(i);
         pos -= config.mesh->center;
 
-        pos = cmul(pos, config.scale + (i != 0 ? 0.9f : 0.0f));
+        pos = cmul(pos, config.scale + inflate);
         pos += config.offset;
 
         v.prevPosition = pos;
@@ -699,7 +744,8 @@ void createSoftBody(SoftBody& config, std::shared_ptr<Entity> entity) {
         }
 
         // each vertex gets a quarter of the adjacent mass
-        v.mass = density * (0.25 * volume);
+        //v.mass = density * (0.25 * volume);
+        v.mass = config.mass / config.mesh->num_vertices;
 
         entity->body->vertices.emplace_back(v);
     }
@@ -707,118 +753,50 @@ void createSoftBody(SoftBody& config, std::shared_ptr<Entity> entity) {
     entity->body->forces.emplace_back(std::make_shared<DeformationForceElement>(config, entity));
 }
 
+float3 collision_force(float b, float stiffness, float depth, float3 normal) {
+    return b * stiffness * depth * normal;
+}
+
+float3x3 collision_hessian(float b, float stiffness, float depth, float3 normal) {
+    return b * b * stiffness * linalg::outerprod(normal, normal);
+}
+
+void collide_sphere_plane(float radius, float3 position, float3 plane_offset, float3 plane_normal, float &depth) {
+    depth = radius - dot(position - plane_offset, plane_normal);
+}
+
+
 
 struct World {
-
-    std::shared_ptr<Entity> e_particles;
-    std::shared_ptr<Entity> e_tet;
+    std::vector<std::shared_ptr<Entity>> entities;
 
     Renderer renderer;
     PhysicsConfig physics;
 
-    World() : renderer{ build_default_camera() }, 
-        e_particles{ std::make_shared<Entity>() },
-        e_tet{ std::make_shared<Entity>() } {
+    std::vector<std::unique_ptr<RenderProxy>> staticRenderers;
 
-        std::shared_ptr<Shader> defaultShader = Shader::create(
-            (config.resources / "shaders" / "default.vert"),
-            (config.resources / "shaders" / "default.frag")
-        );
-
-        std::shared_ptr<StaticTriangleMesh> obj = StaticTriangleMesh::create(
-            (config.resources / "models" / "smallsphere.obj")
-        );
-
-
-        // particle system
-        Particles particle_config;
-        particle_config.radius = 10.0f;
-        particle_config.mass = 1.0;
-        particle_config.mesh = obj;
-        particle_config.shader = defaultShader;
-
-
-        auto n_vertices = 10;
-        for (int i = 0; i < n_vertices; ++i) {
-            particle_config.positions.emplace_back(i, 1.0f, i);
-            particle_config.velocities.emplace_back(0.0f, 5.0 * i + 2.0, 0.0f);
-        }
-
-        e_particles->drawer = std::move(std::make_unique<ParticleRenderProxy>(particle_config, e_particles));
-        e_particles->body = std::move(std::make_unique<PhysicsBody>());
-        
-
-        for (int i = 0; i < n_vertices; ++i) {
-            Vertex v;
-            v.prevPosition = particle_config.positions[i];
-            v.velocity = particle_config.velocities[i];
-            v.mass = particle_config.mass;
-
-            e_particles->body->vertices.emplace_back(v);
-        }
-
-        // soft body 
-
-        auto base_tet_model = (config.resources / "models" / "tet_sphere");
-        std::shared_ptr<TetrahedraMesh> tet_sphere = TetrahedraMesh::create(
-            base_tet_model / "tet_sphere.node",
-            base_tet_model / "tet_sphere.ele",
-            base_tet_model / "tet_sphere.face"
-        );
-
-        base_tet_model = (config.resources / "models" / "single_tet");
-        std::shared_ptr<TetrahedraMesh> single_tet = TetrahedraMesh::create(
-            base_tet_model / "single_tet.node",
-            base_tet_model / "single_tet.ele",
-            base_tet_model / "single_tet.face"
-        );
-
-
-        SoftBody softbody_config;
-        softbody_config.offset = float3(0.0, 5.0, 0.0);
-        softbody_config.scale = float3(1.0f);
-
-        softbody_config.mesh = single_tet;
-        softbody_config.shader = defaultShader;
-
-        softbody_config.energy_model = EnergyModel::StandardNeoHookean;
-        softbody_config.differentiation_mode = ElasticEnergyDifferentiationMode::Analytical;
-        softbody_config.mass = 1.0f;
-        /*softbody_config.mu = 1.0714e+3;
-        softbody_config.lambda = 4.2857e+3f;*/
-        softbody_config.mu = 109;
-        softbody_config.lambda = 27;
-
-        createSoftBody(softbody_config, e_tet);
-        
-
-        // Physics System configuration
-
-        //physics.a_ext = float3(0.0, -9.8, 0.0);
-        physics.a_ext = float3(0.0, 0.0, 0.0);
-        physics.timestep = 1.0 / 60.0;
-    }
-    
-    void syncOne(std::shared_ptr<Entity>& e) {
-        if (e && e->drawer) e->drawer->sync();
-    }
-
-    void drawOne(std::shared_ptr<Entity>&e) {
-        if (e && e->drawer) e->drawer->draw(renderer);
-    }
+    World(
+        PhysicsConfig _physics, 
+        Camera _camera,
+        std::vector<std::shared_ptr<Entity>> _entities, 
+        std::vector<std::unique_ptr<RenderProxy>> _staticRenderers) : 
+        renderer{_camera},
+        physics{_physics},
+        staticRenderers{std::move(_staticRenderers)},
+        entities{ _entities } { }
 
 public:
     void stepPhysics(float timestep) {
 
         float stiffness = 1e+5;
-        float planey = -1;
+        float3 planeoff(0.0, -1.0, 0.0);
         float3 planen(0.0, 1.0, 0.0);
 
 
         std::vector<PhysicsBody*> bodies;
-        if (e_tet && e_tet->body) bodies.push_back(e_tet->body.get());
-        if (e_particles && e_particles->body) bodies.push_back(e_particles->body.get());
-
+        for (auto& e : entities) {
+            if (e && e->body) bodies.push_back(e->body.get());
+        }
         // run collision pass
 
         // make initial guess
@@ -830,8 +808,13 @@ public:
             }
         }
 
-        for (int i = 0; i < 5; ++i) {
-                // do a collision update
+        int it = 0;
+        float criterion;
+        float firstCriterion;
+        while(true) {
+            criterion = 0;
+                
+            // do a collision update
 
             for (auto* body : bodies) {
                 for (unsigned int vidx  = 0; vidx < body->vertices.size(); ++vidx) {
@@ -839,42 +822,69 @@ public:
 
                     float3 y = v.prevPosition + timestep * v.velocity + timestep * timestep * physics.a_ext;
 
-                    float3 f = -v.mass * (v.position - y) / (timestep * timestep);
-                    float3 H = float3(v.mass / (timestep * timestep));
-
-                    // apply a collision constraint
-                    float3 diff = float3(0.0, planey - v.position.y, 0.0);
-                    float pen = dot(diff, planen);
-                    if (pen > 0) {
-                        f += stiffness * planen * diff;
-                        H.y += stiffness;
+                    float3 finertia = -v.mass * (v.position - y) / (timestep * timestep);
+                    
+                    float3x3 Hinertia(0.0);
+                    for (int i = 0; i < 3; ++i) {
+                        Hinertia[i][i] = v.mass / (timestep * timestep);
                     }
 
-                    float3x3 Hmat;
-                    for (int i = 0; i < 3; ++i) {
-                        Hmat[i][i] = H[i];
+                    // accumulators for external forces
+                    float3 f(0.0);
+                    float3x3 H(0.0f);
+
+                    // apply a collision constraint
+
+                    float pen;
+                    collide_sphere_plane(0.5f, v.position, planeoff, planen, pen);
+                
+                    if (pen > 0) {
+                        f -= collision_force(-1, stiffness, pen, planen);
+                        H += collision_hessian(-1, stiffness, pen, planen);
                     }
 
                     // compute body forces
                     for (auto& force : body->forces) {
-                        if (force) force->add_force_and_hessian(vidx, f, Hmat);
+                        if (force) force->add_force_and_hessian(vidx, f, H);
                     }
 
+                    float3x3 rayleighDamping = (physics.dampingFactor / timestep) * H;
 
-                    float3 dx = solveHouseholderQR(Hmat, f);
+                    float3x3 hessian = Hinertia + H + rayleighDamping;
+
+
+                    float3 force = finertia + f - mul(rayleighDamping, (v.position - v.prevPosition));
+
+
+                    float3 dx = solveHouseholderQR(hessian, force);
                     if (length(dx) > 1) {
                         printf("length(dx)=  %f\n", length(dx));
                         printf("H = I[%f %f %f]^T\n", H.x, H.y, H.z); 
                     }
 
+
                     // float3 dx = float3(f.x/H.x, f.y/H.y, f.z/H.z);
                     v.position += dx;
                 }
-
             }
+
+            if (it == 0) firstCriterion = criterion;
+
+            ++it;
+
+            // stop after a max number of iterations
+            if (physics.max_iterations > 0 && it >= physics.max_iterations) break;
+
+            // stop at an absolute error
+            // always run at least once otherwise we dont have the current error
+            //if (it != 0 && criterion < physics.tolerance * physics.tolerance * firstCriterion) break;
+            // printf("[Physics] iteration %d residual %3.6f\n", it, std::sqrt(criterion));
+
         }
 
-        e_tet->body->vertices[0].position = e_tet->body->vertices[0].prevPosition;
+        printf("[Physics] step took %d iterations ending with %3.6f error\n", it, std::sqrt(criterion));
+
+        //e_tet->body->vertices[0].position = e_tet->body->vertices[0].prevPosition;
 
         // commit the changes
         for (auto* body : bodies) {
@@ -883,24 +893,46 @@ public:
                 v.prevPosition = v.position;
             }
         }
-
-        
     }
     
     void sync() {
-        syncOne(e_particles);
-        syncOne(e_tet);
+        for (auto& e : entities) {
+            if (e && e->drawer) e->drawer->sync();
+        }
     }
 
     void draw() {
         renderer.startFrame();
-        drawOne(e_particles);
-        drawOne(e_tet);
+        
+        for (auto& e : entities) {
+            if (e && e->drawer) e->drawer->draw(renderer);
+        }
+
+        for (auto& proxy : staticRenderers) {
+            if (proxy) proxy->draw(renderer);
+        }
     }
 };
 
+
+
+
+size_t num_scenes = 1;
+bool stopSimulation = false;
+bool simPaused = false;
+size_t current_world = 0;
+
+bool keyBuffer[GLFW_KEY_LAST];
+
+float getInputAxis(int pos, int neg) {
+    float out = 0.0;
+    if (keyBuffer[pos]) out += 1.0f;
+    if (keyBuffer[neg]) out -= 1.0f;
+    return out;
+}
+
 void run(World world){
-    const float timestep = 1.0/60.0;
+    const float timestep = world.physics.timestep;
 
     const double dt = 1.0 / 60.0;
     double last = glfwGetTime();
@@ -909,34 +941,197 @@ void run(World world){
     // sync at the start of the first frame
     world.sync();
 
-    while (!glfwWindowShouldClose(window))
+    while (!stopSimulation && !glfwWindowShouldClose(window))
     {
 
-        double now = glfwGetTime();
-        accumulator += now - last;
-        last = now;
-        
         glfwPollEvents();
 
-        // physics stepping
-        if (accumulator >= timestep) {
-            while (accumulator >= timestep)
-            {
-                world.stepPhysics(timestep);
-                
-                accumulator -= timestep;
-            }
+        double now = glfwGetTime();
+        double dt = now - last;
+        accumulator += dt;
+        last = now;
+        
 
+        // physics stepping
+        if (!simPaused && accumulator >= timestep) { 
+            // run the physics step at most once per real world time step
+            // if the physic simulation slows down then the whole thing will slow down. this is fine.
+            accumulator = 0;
+
+            world.stepPhysics(timestep);
             world.sync();
         }
-
-        /*world.stepPhysics(timestep);
-        world.sync();*/
 
         world.draw();
         
         glfwSwapBuffers(window);
+
+        world.renderer.camera.origin +=
+            getInputAxis(GLFW_KEY_Q, GLFW_KEY_Z) *
+            world.renderer.camera.up * 20.0f * (float)dt;
+
+        float3 posCyl = world.renderer.camera.origin - world.renderer.camera.poi;
+        posCyl -= world.renderer.camera.up * dot(posCyl, world.renderer.camera.up);
+
+
+        float radius = std::hypot(posCyl.x, posCyl.z);
+        radius = std::max(0.01f, radius + getInputAxis(GLFW_KEY_S, GLFW_KEY_W) * 20.0f * (float)dt);
+
+
+        float theta = std::atan2(posCyl.z, posCyl.x);
+        theta += getInputAxis(GLFW_KEY_A, GLFW_KEY_D) * 60.0f * (float)dt * DegToRad;
+
+        world.renderer.camera.origin.x = radius * std::cos(theta);
+        world.renderer.camera.origin.z = radius * std::sin(theta);
+
+
+        world.renderer.updateCamera();
     }
+}
+
+
+std::shared_ptr<Shader> defaultShader;
+std::shared_ptr<StaticTriangleMesh> plane;
+std::shared_ptr<StaticTriangleMesh> sphereParticle;
+std::shared_ptr<TetrahedraMesh> single_tet;
+std::shared_ptr<TetrahedraMesh> tet_cube;
+std::shared_ptr<TetrahedraMesh> tet_octa;
+
+
+void build_shared_resources() {
+    defaultShader = Shader::create(
+        (config.resources / "shaders" / "shaded.vert"),
+        (config.resources / "shaders" / "shaded.frag")
+    );
+
+
+    plane = StaticTriangleMesh::create(
+        (config.resources / "models" / "plane.obj"), 100.0f
+    );
+
+    sphereParticle = StaticTriangleMesh::create(
+        (config.resources / "models" / "smallsphere.obj"), 0.5f
+    );
+
+
+    auto base_path = (config.resources / "models" / "single_tet");
+    single_tet = TetrahedraMesh::create(
+        base_path / "single_tet.node",
+        base_path / "single_tet.ele",
+        base_path / "single_tet.face"
+    );
+    
+    base_path = (config.resources / "models" / "single_cube");
+    tet_cube = TetrahedraMesh::create(
+        base_path / "single_cube.node",
+        base_path / "single_cube.ele",
+        base_path / "single_cube.face"
+    );
+
+    base_path = (config.resources / "models" / "single_octahedron");
+    tet_octa = TetrahedraMesh::create(
+        base_path / "single_octahedron.node",
+        base_path / "single_octahedron.ele",
+        base_path / "single_octahedron.face"
+    );
+
+}
+
+Camera build_default_camera() {
+    Camera c;
+
+    c.origin = { 0.0, 1.0, -10 };
+    c.poi = { 0.0, 0.0, 0.0 };
+    c.up = { 0.0, 1.0, 0.0 };
+
+    float globalAspectRatio = float(config.width) / float(config.height);
+    float globalFOV = 45.0f; // vertical field of view
+    float globalDepthMin = 5.0E-02; // for rasterization
+    float globalDepthMax = 100.0f; // for rasterization
+
+    c.aspect = globalAspectRatio;
+    c.fovy = globalFOV;
+    c.zNear = globalDepthMin;
+    c.zFar = globalDepthMax;
+
+    return c;
+}
+
+SoftBody build_default_softbody() {
+    SoftBody softbody_config;
+    softbody_config.offset = float3(0.0, 5.0, 0.0);
+    softbody_config.scale = float3(1.0f);
+
+    softbody_config.mesh = tet_cube;
+    softbody_config.shader = defaultShader;
+    softbody_config.color = float3(1.0f, 0.1f, 0.4f);
+
+    softbody_config.energy_model = EnergyModel::StableNeoHookeanNoLog;
+    softbody_config.differentiation_mode = ElasticEnergyDifferentiationMode::Analytical;
+    softbody_config.mass = 50;
+
+    softbody_config.mu = 1e5;
+    softbody_config.lambda = 1e5f;
+    softbody_config.deviatoricDamping = 1e-6;
+    softbody_config.hydrostaticDamping = 0; //1e-4;
+
+    return softbody_config;
+}
+
+World debugScene() {
+
+    std::vector<std::shared_ptr<Entity>> entities;
+    Camera camera = build_default_camera();
+    PhysicsConfig physics;
+    std::vector<std::unique_ptr<RenderProxy>> staticRenderers;
+
+    staticRenderers.emplace_back(std::make_unique<StaticRenderProxy>(defaultShader, plane, float3(0.5), float3(0.0, -1.0, 0.0)));
+
+
+    // particle system
+    Particles particle_config;
+    particle_config.radius = 0.5;
+    particle_config.mass = 1.0;
+    particle_config.mesh = sphereParticle;
+    particle_config.shader = defaultShader;
+
+    auto n_vertices = 10;
+    for (int i = 0; i < n_vertices; ++i) {
+        particle_config.positions.emplace_back(i, 1.0f, i);
+        particle_config.velocities.emplace_back(0.0f, 5.0 * i + 2.0, 0.0f);
+    }
+
+    std::shared_ptr<Entity> e_particles = std::make_shared<Entity>();
+    e_particles->drawer = std::move(std::make_unique<ParticleRenderProxy>(particle_config, e_particles));
+    e_particles->body = std::move(std::make_unique<PhysicsBody>());
+
+
+    for (int i = 0; i < n_vertices; ++i) {
+        Vertex v;
+        v.prevPosition = particle_config.positions[i];
+        v.velocity = particle_config.velocities[i];
+        v.mass = particle_config.mass;
+
+        e_particles->body->vertices.emplace_back(v);
+    }
+
+    // soft body 
+    std::shared_ptr<Entity> e_tet = std::make_shared<Entity>();
+    createSoftBody(build_default_softbody(), e_tet);
+
+
+    // Physics System configuration
+
+    physics.a_ext = float3(0.0, -9.8, 0.0);
+    physics.timestep = 1.0 / 60.0;
+    physics.tolerance = 1e-3;
+    physics.max_iterations = 50;
+    physics.dampingFactor = 1e-6;
+
+    entities.push_back(e_particles);
+    entities.push_back(e_tet);
+
+    return World(physics, camera, entities, std::move(staticRenderers));
 }
 
 int main(int argc, char *argv[])
@@ -945,10 +1140,17 @@ int main(int argc, char *argv[])
     config = parse_args(argc, argv);
 
     window = setup_window();
+    build_shared_resources();
     while (!glfwWindowShouldClose(window)) {
 
+        printf("starting world %d...\n", current_world);
+        stopSimulation = false;
+        simPaused = true;
         // todo: switch on which world to run
-        run(World());
+        //run(builders[current_world].build(globalRenderer));
+        run(debugScene());
+
+        printf("resetting world...\n");
 
     }
     
@@ -957,10 +1159,32 @@ int main(int argc, char *argv[])
     return 0;
 }
 
+
 void key_callback(GLFWwindow* window, int key, int scancode, int action, int mode)
 {
+    if (action == GLFW_PRESS) {
+        keyBuffer[key] = true;
+    }
+    else if (action == GLFW_RELEASE) {
+        keyBuffer[key] = false;
+    }
+
     if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS)
         glfwSetWindowShouldClose(window, GL_TRUE);
+    if (key == GLFW_KEY_LEFT && action == GLFW_PRESS) {
+        stopSimulation = true;
+        current_world = std::min(current_world + 1, num_scenes- 1);
+    }
+    if (key == GLFW_KEY_RIGHT && action == GLFW_PRESS) {
+        stopSimulation = true;
+        current_world = std::max(current_world - 1, 0ull);
+    }
+    if (key == GLFW_KEY_R && action == GLFW_PRESS) {
+        stopSimulation = true;
+    }
+    if (key == GLFW_KEY_P && action == GLFW_PRESS) {
+        simPaused = !simPaused;
+    }
 }
 
 void mouse_button_callback(GLFWwindow* window, int button, int action, int mods) {
