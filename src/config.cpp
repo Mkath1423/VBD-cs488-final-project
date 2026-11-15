@@ -41,14 +41,17 @@ namespace {
 
 	const std::map<std::string, ArgInfo> optionalArgs = {
 		{"height", ArgInfo([](Config& c, std::string v) {c.height = std::stoi(std::string(v)); }, "height") },
-		{ "width", ArgInfo([](Config& c, std::string v) {c.width = std::stoi(std::string(v)); }, "width") }
+		{ "width", ArgInfo([](Config& c, std::string v) {c.width = std::stoi(std::string(v)); }, "width") },
+		{ "convergence", ArgInfo([](Config& c, std::string v) {c.convergence = std::stoi(std::string(v)); }, "convergence") },
+		{ "iterations", ArgInfo([](Config& c, std::string v) {c.max_iterations = std::stoi(std::string(v)); }, "iterations") }
 	};
 
 	const std::map<char, std::string> shorthands = {
 		{ 'h', "height"},
 		{ 'w', "width"},
+		{ 'c', "convergence"},
+		{ 'i', "iterations"}
 	};
-
 }
 
 

@@ -9,29 +9,8 @@
 
 #include "config.h"
 
-#include "engine.h"
 #include "resources/shader.h"
 #include "resources/meshes.h"
-
-void key_callback(GLFWwindow* window, int key, int scancode, int action, int mode);
-
-
-void mouse_button_callback(GLFWwindow* window, int button, int action, int mods); 
-void cursor_pos_callback(GLFWwindow* window, double mouse_x, double mouse_y);
-
-Config config;
-
-const GLuint WIDTH = 800, HEIGHT = 600;
-
-// Shaders
-//const GLchar* vertexShaderSource = "#version 330 core\n"
-//"layout (location = 0) in vec3 position;\n"
-//"void main()\n"
-//"{\n"
-//"gl_Position = vec4(position.x, position.y, position.z, 1.0);\n"
-//"}\0";
-std::string vertexShaderSource;
-std::string fragmentShaderSource;
 
 #include "linalg.h"
 
@@ -41,6 +20,13 @@ using namespace linalg::aliases;
 #include "rendering.h"
 
 
+void key_callback(GLFWwindow* window, int key, int scancode, int action, int mode);
+void mouse_button_callback(GLFWwindow* window, int button, int action, int mods); 
+void cursor_pos_callback(GLFWwindow* window, double mouse_x, double mouse_y);
+
+Config config;
+GLFWwindow* window;
+//Renderer globalRenderer;
 
 GLFWwindow *setup_window(){
     if (!glfwInit()) {
@@ -84,28 +70,23 @@ GLFWwindow *setup_window(){
     glEnable(GL_DEPTH_TEST);
     glDepthFunc(GL_LESS);
 
+    glDisable(GL_CULL_FACE);
+
     return window;
 }
 
-
-
-struct Vertex {
-    float3 position;
-    float3 velocity;
-};
-
-float3 solveHouseholderQR(float3x3 H, float3 f){
-    auto dot_from_k = [](float3 a, float3 b, int k){
+float3 solveHouseholderQR(float3x3 H, float3 f) {
+    auto dot_from_k = [](float3 a, float3 b, int k) {
         float acc = 0;
-        
-        for(int i = k; i < 3; ++i){ // row
-            acc += a[i] * b[i]; 
+
+        for (int i = k; i < 3; ++i) { // row
+            acc += a[i] * b[i];
         }
 
         return acc;
-    };
-    
-    for(int k = 0; k < 3; ++k){
+        };
+
+    for (int k = 0; k < 3; ++k) {
         float3 x = H[k];
 
         float3 vk = x;
@@ -113,27 +94,27 @@ float3 solveHouseholderQR(float3x3 H, float3 f){
         vk /= sqrt(dot_from_k(vk, vk, k));
 
         // update lower right block
-        for(int j = k; j < 3; ++j){ // col
+        for (int j = k; j < 3; ++j) { // col
             float vkTAj = dot_from_k(vk, H[j], k);
 
             // update R
-            for(int i = k; i < 3; ++i){ // row
+            for (int i = k; i < 3; ++i) { // row
                 H[j][i] -= 2 * vk[i] * vkTAj;
-            }   
+            }
         }
 
         // update QTb
         float vkTb = dot_from_k(vk, f, k);
-        
-        for(int i = k; i < 3; ++i){ // row
+
+        for (int i = k; i < 3; ++i) { // row
             f[i] -= 2 * vk[i] * vkTb;
         }
     }
-    
+
     // backward solve
-    for(int i = 3 - 1; i >= 0; --i){
+    for (int i = 3 - 1; i >= 0; --i) {
         float tmp = 0;
-        for(int j = i+1; j < 3; ++j){
+        for (int j = i + 1; j < 3; ++j) {
             tmp += H[i][j] * f[j];
         }
         f[i] = (f[i] - tmp) / H[i][i];
@@ -142,199 +123,1371 @@ float3 solveHouseholderQR(float3x3 H, float3 f){
     return f;
 }
 
-GLFWwindow *window;
-void run(){
-    Engine engine;
+
+struct Vertex {
+    float3 position;
+    float3 prevPosition;
+    float3 velocity;
+    float3 dx;
+    float3 prevDx;
+    float mass, radius;
+};
+
+struct PhysicsBody;
+
+struct ForceElement {
+    virtual void add_force_and_hessian(unsigned int vertex_id, float3& f, float3x3& H) = 0;
+};
+
+struct PhysicsBody {
+    std::vector<Vertex> vertices;
+    std::vector<std::shared_ptr<ForceElement>> forces;
+};
+
+struct PhysicsConfig {
+    float timestep;
+    float3 a_ext;
+    float tolerance;
+    int max_iterations; // unused
+    float dampingFactor;
+    bool useCriterion; // unused
+    float collisionStiffness;
+};
 
 
-    // vertexShaderSource = read_file(config.resources / "shaders" / "default.vert");
-    // fragmentShaderSource = read_file(config.resources / "shaders" / "default.frag");
+struct Entity {
+    uint64_t id;
+    std::unique_ptr<PhysicsBody> body;
+    std::unique_ptr<RenderProxy> drawer;
+    //std::shared_ptr<CollisionObject> geo;
 
-    Resource<Camera> mainCamera = engine.create<Camera>();
-    mainCamera->origin = { 0.0, 0.0, -10 };
-    mainCamera->poi = { 0.0, 0.0, 0.0 };
-    mainCamera->up = { 0.0, 1.0, 0.0 };
+    Entity() : id{0}, body{nullptr}, drawer{ nullptr } { }
+};
+
+
+
+
+struct Particles {
+    std::vector<float3> positions;
+    std::vector<float3> velocities;
+
+    std::shared_ptr<StaticTriangleMesh> mesh;
+    std::shared_ptr<Shader> shader;
+    float radius, mass;
+    float3 color = float3(1.0f, 0.1f, 0.4f);
+};
+
+
+class ParticleRenderProxy : public RenderProxy {
+
+    // config parameters
+    std::shared_ptr<Shader> shader;
+    std::shared_ptr<StaticTriangleMesh> mesh;
+    float radius;
+    float3 color;
+
+    // synced state
+    std::vector<float3> positions;
+
+    std::weak_ptr<Entity> w_entity;
+
+public:
+    ParticleRenderProxy(Particles& config, std::weak_ptr<Entity> _entity) :
+        w_entity{ std::move(_entity) },
+        shader{ config.shader },
+        mesh{ config.mesh },
+        radius{ config.radius },
+        color{ config.color }  {
+    }
+
+    void sync() override {
+        auto entity = w_entity.lock();
+        if (entity && entity->body) {
+
+            positions.clear();
+            for (const auto& v : entity->body->vertices) {
+                positions.emplace_back(v.prevPosition);
+            }
+        }
+    }
+
+    void draw(Renderer& renderer) override {
+        auto entity = w_entity.lock();
+        if (entity) { // only draw things that still exist
+            renderer.setShader(shader);
+
+            for (auto& p : positions) {
+                float4x4 modelMat = linalg::identity;
+                //modelMat *= radius;
+                modelMat.w = float4(p.x, p.y, p.z, 1.0);
+
+                renderer.setTransform(modelMat);
+                renderer.setColor(color);
+                mesh->draw();
+            }
+        }
+    }
+};
+
+class StaticRenderProxy : public RenderProxy {
+
+    // config parameters
+    std::shared_ptr<Shader> shader;
+    std::shared_ptr<StaticTriangleMesh> mesh;
+    float3 color;
+    float3 offset;
+
+    std::weak_ptr<Entity> w_entity;
+
+public:
+    StaticRenderProxy(std::shared_ptr<Shader> shader, std::shared_ptr<StaticTriangleMesh> mesh, float3 color, float3 offset) :
+        shader{ shader},
+        mesh{ mesh },
+        color{ color },
+        offset{ offset } {
+    }
+
+    void sync() override { }
+
+    void draw(Renderer& renderer) override {
+        auto entity = w_entity.lock();
+        renderer.setShader(shader);
+
+        float4x4 modelMat = linalg::identity;
+        modelMat.w = float4(offset, 1.0);
+        renderer.setTransform(modelMat);
+        renderer.setColor(color);
+        mesh->draw();
+    }
+};
+
+enum EnergyModel {
+    None,
+    StableNeoHookeanNoLog,
+    AlphaOneNeoHookean,
+    StableNeoHookean,
+} ;
+
+enum ElasticEnergyDifferentiationMode {
+    FiniteDifferences,
+    Analytical
+} ;
+
+struct SoftBody {
+    float3 offset;
+    float3 scale;
+
+    std::shared_ptr<TetrahedraMesh> mesh;
+    std::shared_ptr<Shader> shader;
+    float3 color = float3(1.0f, 0.1f, 0.4f);
+    
+    float mass;
+    EnergyModel energy_model;
+    ElasticEnergyDifferentiationMode differentiation_mode;
+
+
+    float mu, lambda, hydrostaticDamping, deviatoricDamping;
+
+   /* static void create(SoftBody& config, std::shared_ptr<Entity> e) {
+
+    }*/
+};
+
+class SoftBodyRenderProxy : public RenderProxy {
+    // rendering things
+    RenderMesh renderMesh;
+
+    // config parameters
+    std::shared_ptr<Shader> shader;
+    std::shared_ptr<TetrahedraMesh> mesh;
+    float3 color;
+
+    // synced state
+    std::vector<float3> positions;
+
+    std::weak_ptr<Entity> w_entity;
+
+public:
+    SoftBodyRenderProxy(const SoftBody& config, std::weak_ptr<Entity> _entity) :
+        w_entity{ std::move(_entity) },
+        shader{ config.shader },
+        mesh{ config.mesh },
+        color{ config.color } {
+
+        renderMesh.buffer_elements(
+            mesh->fileData.faces.data(), 
+            mesh->fileData.faces.size());
+    }
+
+    void sync() override {
+        auto entity = w_entity.lock();
+        if (entity && entity->body) {
+
+            std::vector<float> vertex_buffer;
+            vertex_buffer.reserve(3 * entity->body->vertices.size());
+
+            for (const auto& v : entity->body->vertices) {
+                vertex_buffer.emplace_back(v.prevPosition.x);
+                vertex_buffer.emplace_back(v.prevPosition.y);
+                vertex_buffer.emplace_back(v.prevPosition.z);
+            }
+
+            renderMesh.buffer_vertices(
+                vertex_buffer.data(), vertex_buffer.size());
+        }
+    }
+
+    void draw(Renderer& renderer) override {
+        auto entity = w_entity.lock();
+        if (entity) { 
+            renderer.setShader(shader);
+            float4x4 I = linalg::identity;
+            renderer.setTransform(I);
+            renderer.setColor(color);
+            renderMesh.draw_triangles();
+        }
+    }
+};
+
+namespace NeoHookenModel {
+
+    struct float9x9 {
+        float data[81];
+
+        float9x9() {}
+
+        float& at(size_t r, size_t c) {
+            return data[r + c * 9];
+        }
+    };
+
+    static float energy(const float3x3 F, const float mu, const float lambda, float restVolume) {
+        float J = linalg::determinant(F);
+
+        float Ic = linalg::trace(mul(linalg::transpose(F), F));
+        float phi = 0.5 * mu * (Ic - 3) + 0.5 * lambda * std::pow((J - 1 - mu / lambda), 2.0);
+
+        float E = restVolume * phi;
+        return E;
+    }
+
+
+    static void forceAndHessian(unsigned int vertexIndex, const float3x3 &Dminv, const float3x3 &F, const float mu, const float lambda, float restVolume, float3 &force, float3x3 &hessian, const float deviatoricDamping, const float hydrostaticDamping, float timestep, float3 displacement) {
+
+        // Force
+        
+        // derivative of energy w.r.t deformation gradient
+        float J = linalg::determinant(F);
+
+        float3x3 dJdF;
+        dJdF[0] = cross(F[1], F[2]);
+        dJdF[1] = cross(F[2], F[0]);
+        dJdF[2] = cross(F[0], F[1]);
+
+        float3x3 dEdF = restVolume * (mu * F + lambda * (J - 1 - mu / lambda) * dJdF);
+
+        // derivative of deformation gradient w.r.t. vertex position
+        float3 dFdx;
+        if (vertexIndex == 0) {
+            dFdx[0] = -sum(Dminv[0]);
+            dFdx[1] = -sum(Dminv[1]);
+            dFdx[2] = -sum(Dminv[2]);
+        }
+        else {
+            dFdx[0] = Dminv[0][vertexIndex - 1];
+            dFdx[1] = Dminv[1][vertexIndex - 1];
+            dFdx[2] = Dminv[2][vertexIndex - 1];
+        }
+        
+        // chain rule
+        // dEdx = dFdx : dEdF
+        // where dFdx is a third order tensor and ": dEdF" is the double contraction of its elements by dEdF
+        // in the case of 3D tetrahedra dFdx is very sparse 
+        // each sub matrix has one none zero row and they are all the same but shifted down
+        float3 dEdx;
+        for (int i = 0; i < 3; ++i) {
+            dEdx[i] = dFdx[0] * dEdF[0][i] + dFdx[1] * dEdF[1][i] + dFdx[2] * dEdF[2][i];
+        }
+
+
+        // Hessian
+        // this uses dense 9x9 matrices which represent flattened 4th order tensors
+        //  (i wish i was still in pytorch land)
+        
+        // surely this will get inlined...
+        // im not using attributes to make it happen though
+
+        float9x9 dPhidFdF;
+
+        // flattened indexing a 3x3 matrix
+        auto ref = [](float3x3& mat, size_t idx) -> float& {
+            return mat[idx % 3][idx / 3];
+        };
+
+        // outer product of vec(dJdF) and vec(dJdF)
+        // i really hope this gets unrolled
+        for (int i = 0; i < 9; ++i) {
+            for (int j = 0; j < 9; ++j) {
+                dPhidFdF.at(i, j) = lambda * ref(dJdF, i) * ref(dJdF, j);
+            }
+
+            // diagonal mu * I_9x9 terms
+            dPhidFdF.at(i, i) += mu;
+        }
+
+        // the wreched d2JdF2 term
+        // (its a bunch of cross product matrices)
+        float c = lambda * (J - 1);
+
+        auto block = [&c, &dPhidFdF](float3 f, size_t block_row, size_t block_col) -> void {
+            // 00
+            dPhidFdF.at(1 + block_row * 3, 0 + block_col * 3) += c * f[2];
+            dPhidFdF.at(2 + block_row * 3, 0 + block_col * 3) -= c * f[1];
+            
+            dPhidFdF.at(0 + block_row * 3, 1 + block_col * 3) -= c * f[2];
+            // 11
+            dPhidFdF.at(2 + block_row * 3, 1 + block_col * 3) += c * f[0];
+            
+            dPhidFdF.at(0 + block_row * 3, 2 + block_col * 3) += c * f[1];
+            dPhidFdF.at(1 + block_row * 3, 2 + block_col * 3) -= c * f[0];
+            // 22
+        };
+
+        // block(0, 0) = 0
+        block( F[2], 1, 0); // block(1, 0) =  hatf2
+        block(-F[1], 2, 0); // block(2, 0) = -hatf1
+        
+        block(-F[2], 0, 1); // block(0, 1) = -hatf2
+        // block(1, 1) = 0
+        block( F[0], 2, 1); // block(2, 1) =  hatf0
+        
+        block( F[1], 0, 2); // block(0, 2) =  hatf1
+        block(-F[0], 1, 2); // block(1, 2) = -hatf0
+        // block(2, 2) = 0
+
+        for (int i = 0; i < 9 * 9; ++i) dPhidFdF.data[i] *= restVolume;
+
+        float3x3 dPhidxdx;
+        
+        // this exploits the sparity of the dFdx tensor...
+        // ...but at a small cost
+        // have fun reading that one!
+        for (size_t row = 0; row < 3; ++row) {
+            for (size_t col = 0; col < 3; ++col) {
+                auto vecdFdxT_dPhidFdF = [&dFdx, &dPhidFdF](size_t r, size_t c) -> float {
+                    return 
+                        dFdx[0] * dPhidFdF.at(r + 0, c) + 
+                        dFdx[1] * dPhidFdF.at(r + 3, c) + 
+                        dFdx[2] * dPhidFdF.at(r + 6, c);
+                };
+                /*
+                dPhidxdx[col][row] = (vecdFdx^T * dPhidFdF)[row, :] . vecdFdx[col]
+                dPhidxdx[col][row] = 
+                    (vecdFdx ^ T * dPhidFdF)[row, 0 + col] * vecdFdx[row + 0, col] + 
+                    (vecdFdx ^ T * dPhidFdF)[row, 3 + col] * vecdFdx[row + 3, col] + 
+                    (vecdFdx ^ T * dPhidFdF)[row, 6 + col] * vecdFdx[row + 6, col]
+
+                dPhidxdx[col][row] = 
+                    (vecdFdx ^ T * dPhidFdF)[row, 0 + col] * dFdx[0]+ 
+                    (vecdFdx ^ T * dPhidFdF)[row, 3 + col] * dFdx[1]+ 
+                    (vecdFdx ^ T * dPhidFdF)[row, 6 + col] * dFdx[2]
+                */
+
+                dPhidxdx[col][row] =
+                    dFdx[0] * vecdFdxT_dPhidFdF(row, col + 0) +
+                    dFdx[1] * vecdFdxT_dPhidFdF(row, col + 3) +
+                    dFdx[2] * vecdFdxT_dPhidFdF(row, col + 6);
+            }
+        }
+
+        // referenced from the GAIA codebase
+        float3x3 damping = dPhidxdx * hydrostaticDamping;
+
+        float tmp = dot(dFdx, dFdx) * mu * restVolume * deviatoricDamping;
+        damping[0][0] += tmp;
+        damping[1][1] += tmp;
+        damping[2][2] += tmp;
+        damping /= timestep;
+
+        float3 rayleighForce = mul(damping, displacement);
+
+
+        // i lied dPhidxdx is actually the energy hessian not the energy density hessian :)
+        force -= dEdx + rayleighForce;
+        hessian += dPhidxdx + damping;
+    }
+};
+
+
+
+struct DeformationForceElement : public ForceElement {
+    // config parameters
+    float mu, lambda, hydrostaticDamping, deviatoricDamping;
+    std::shared_ptr<TetrahedraMesh> mesh;
+    float3 scale;
+    EnergyModel energy_model;
+    ElasticEnergyDifferentiationMode differentiation_mode;
+    
+    std::weak_ptr<Entity> w_entity;
+
+    float alpha(float mu, float lambda) {
+        return 1 + mu / lambda;
+    }
+
+    float3x3 deformationGradient(TetrahedraMesh::Element &ele, float3 positions[4]) {
+
+        // Dm = D(scale) * Dm_original <- scaleing the points
+        // Dm^-1 = (Dm_original^-1) * D(scale)^-1
+        auto Dminv = ele.Dminv;
+        Dminv[0] /= scale[0];
+        Dminv[1] /= scale[1];
+        Dminv[2] /= scale[2];
+
+        auto Ds = float3x3(positions[1] - positions[0], positions[2] - positions[0], positions[3] - positions[0]);
+
+        return mul(Ds, Dminv);
+    }
+
+    float computeEnergy(TetrahedraMesh::Element& ele, float3 positions[4]) {
+
+        auto F = deformationGradient(ele, positions);
+
+        switch (energy_model) {
+        case EnergyModel::StableNeoHookeanNoLog:
+            return NeoHookenModel::energy(F, mu, lambda, ele.rest_volume);
+        default:
+            return 0;
+        }
+    }
+
+
+
+    void add_force_and_hessian_from_tet(PhysicsBody &body, unsigned int vertex, unsigned int tet, unsigned int vertexInTet, float3& f, float3x3& H, ElasticEnergyDifferentiationMode mode) {
+        auto& ele = mesh->elementData[tet];
+        
+        float3 positions[4] = {
+                body.vertices[ele.indicies.x].position,
+                body.vertices[ele.indicies.y].position,
+                body.vertices[ele.indicies.z].position,
+                body.vertices[ele.indicies.w].position
+        };
+
+        if (mode == ElasticEnergyDifferentiationMode::FiniteDifferences) {
+
+            float h = 1e-4;
+
+            const float3 x(1.0, 0.0, 0.0);
+            const float3 y(0.0, 1.0, 0.0);
+            const float3 z(0.0, 0.0, 1.0);
+
+            
+
+            // float E_ref = computeEnergy(ele, positions);
+
+            for (int i = 0; i < 3; ++i) {
+                float3 plus[4] = {
+                    positions[0],
+                    positions[1],
+                    positions[2],
+                    positions[3]
+                };
+
+                float3 minus[4] = {
+                    positions[0],
+                    positions[1],
+                    positions[2],
+                    positions[3]
+                };
+
+                plus[vertexInTet][i] += h;
+                minus[vertexInTet][i] -= h;
+
+                f[i] -= (computeEnergy(ele, plus) - computeEnergy(ele, minus)) / (2.0f * h);
+            }
+
+            for (int i = 0; i < 3; ++i) {
+                for (int j = i; j < 3; ++j) {
+
+                    float h = 1e-3;
+
+                    float3 ipjp[4] = {
+                        positions[0],
+                        positions[1],
+                        positions[2],
+                        positions[3]
+                    };
+
+                    float3 ipjm[4] = {
+                        positions[0],
+                        positions[1],
+                        positions[2],
+                        positions[3]
+                    };
+                    
+                    float3 imjp[4] = {
+                        positions[0],
+                        positions[1],
+                        positions[2],
+                        positions[3]
+                    };
+
+                    float3 imjm[4] = {
+                        positions[0],
+                        positions[1],
+                        positions[2],
+                        positions[3]
+                    };
+
+                    ipjp[vertexInTet][i] += h;
+                    ipjp[vertexInTet][j] += h;
+
+                    ipjm[vertexInTet][i] += h;
+                    ipjm[vertexInTet][j] -= h;
+
+                    imjp[vertexInTet][i] -= h;
+                    imjp[vertexInTet][j] += h;
+
+                    imjm[vertexInTet][i] -= h;
+                    imjm[vertexInTet][j] -= h;
+
+                    // this is a huge waste of stack space...
+                    // ...the compiler can have fun optimizing it though
+                    // its not even 100 floats, not that bad really
+
+                    float H_ij = computeEnergy(ele, ipjp) - computeEnergy(ele, ipjm) - (computeEnergy(ele, imjp) - computeEnergy(ele, imjm));
+
+                    H_ij /= 4 * h * h;
+
+                    H[i][j] += H_ij;
+
+                    // hessian is symmetric
+                    if(i != j) H[j][i] += H_ij;
+                }
+            }
+
+
+
+        }
+        else {
+            auto F = deformationGradient(ele, positions);
+
+            auto Dminv = ele.Dminv;
+            Dminv[0] /= scale[0];
+            Dminv[1] /= scale[1];
+            Dminv[2] /= scale[2];
+
+            float3 displacement = body.vertices[vertex].position - body.vertices[vertex].prevPosition;
+
+            switch (energy_model) {
+            case EnergyModel::StableNeoHookeanNoLog:
+                NeoHookenModel::forceAndHessian(vertexInTet, Dminv, F, mu, lambda, ele.rest_volume, f, H, hydrostaticDamping, deviatoricDamping, 1.0/60.0, displacement);
+                return;
+            default:
+                return;
+            }
+        }
+        //printf("deformation energy on %d from %d = %f\n", vertex, tet, E);
+    }
+
+public:
+    DeformationForceElement(const SoftBody& config, std::weak_ptr<Entity> _entity) :
+        w_entity{ std::move(_entity) },
+        mesh{ config.mesh },
+        scale{ config.scale },
+        mu{ config.mu },
+        lambda{ config.lambda },
+        energy_model{ config.energy_model },
+        differentiation_mode{ config.differentiation_mode },
+        hydrostaticDamping{ config.hydrostaticDamping },
+        deviatoricDamping{ config.deviatoricDamping } {
+    }
+
+
+    
+
+    void add_force_and_hessian(unsigned int vertex_id, float3& f, float3x3& H) override {
+        if (!mesh || energy_model == EnergyModel::None) return;
+        auto entity = w_entity.lock();
+        if (entity && entity->body) {
+
+            for (auto& pair : mesh->vertex_adjacency[vertex_id]) {
+
+                add_force_and_hessian_from_tet(*entity->body, vertex_id, pair.elementIdx, pair.subIdx, f, H, differentiation_mode);
+
+            }
+        }
+    }
+};
+
+void createSoftBody(const SoftBody& config, std::shared_ptr<Entity> entity, float3 inflate = float3(0.0)) {
+    entity->drawer = std::move(std::make_unique<SoftBodyRenderProxy>(config, entity));
+    entity->body = std::move(std::make_unique<PhysicsBody>());
+
+    float scale_factor = config.scale.x * config.scale.y * config.scale.z;
+
+    float density = config.mass / config.mesh->volume;
+
+    for (int i = 0; i < config.mesh->num_vertices; ++i) {
+        Vertex v;
+
+        float3 pos = config.mesh->position(i);
+        pos -= config.mesh->center;
+
+        pos = cmul(pos, config.scale + inflate);
+        pos += config.offset;
+
+        v.prevPosition = pos;
+        v.velocity = float3(0.0);
+        
+        float volume = 0;
+
+        // add up the total volume of adjacent elements
+        for (auto &ele : config.mesh->vertex_adjacency[i]) {
+            volume += config.mesh->elementData[ele.elementIdx].rest_volume;
+        }
+
+        // each vertex gets a quarter of the adjacent mass
+        //v.mass = density * (0.25 * volume);
+        v.mass = config.mass / config.mesh->num_vertices;
+        v.radius = 0.0;
+
+        entity->body->vertices.emplace_back(v);
+    }
+
+    entity->body->forces.emplace_back(std::make_shared<DeformationForceElement>(config, entity));
+}
+
+float3 collision_force(float b, float stiffness, float depth, float3 normal) {
+    return b * stiffness * depth * normal;
+}
+
+float3x3 collision_hessian(float b, float stiffness, float depth, float3 normal) {
+    return b * b * stiffness * linalg::outerprod(normal, normal);
+}
+
+void collide_sphere_plane(float radius, float3 position, float3 plane_offset, float3 plane_normal, float &depth) {
+    depth = radius - dot(position - plane_offset, plane_normal);
+}
+
+
+
+struct World {
+    std::vector<std::shared_ptr<Entity>> entities;
+
+    Renderer renderer;
+    PhysicsConfig physics;
+
+    std::vector<std::unique_ptr<RenderProxy>> staticRenderers;
+
+    World(
+        PhysicsConfig _physics, 
+        Camera _camera,
+        std::vector<std::shared_ptr<Entity>> _entities, 
+        std::vector<std::unique_ptr<RenderProxy>> _staticRenderers) : 
+        renderer{_camera},
+        physics{_physics},
+        staticRenderers{std::move(_staticRenderers)},
+        entities{ _entities } { }
+
+public:
+    void stepPhysics(float timestep) {
+
+        float stiffness = physics.collisionStiffness;
+        float3 planeoff(0.0, -1.0, 0.0);
+        float3 planen(0.0, 1.0, 0.0);
+
+
+        std::vector<PhysicsBody*> bodies;
+        for (auto& e : entities) {
+            if (e && e->body) bodies.push_back(e->body.get());
+        }
+        // run collision pass
+
+        // make initial guess
+
+        for (auto* body : bodies) {
+            for (auto& v : body->vertices) {
+                float3 y = v.prevPosition + timestep * v.velocity + timestep * timestep * physics.a_ext;
+                v.position = y;
+            }
+        }
+
+        float firstLoss = 0; // relative loss
+        float lastLoss = 0; // change in loss between frames
+
+        float firstNormDx = 0;
+        float lastNormDx = 0; 
+
+        if (config.convergence) {
+            printf("[Physics] frame start\n");
+        }
+
+        for (int it = 0; it < config.max_iterations; ++it) {
+                
+            // do a collision update
+
+            for (auto* body : bodies) {
+                for (unsigned int vidx  = 0; vidx < body->vertices.size(); ++vidx) {
+                    auto& v = body->vertices[vidx];
+
+                    float3 y = v.prevPosition + timestep * v.velocity + timestep * timestep * physics.a_ext;
+
+                    float3 finertia = -v.mass * (v.position - y) / (timestep * timestep);
+                    
+                    float3x3 Hinertia(0.0);
+                    for (int i = 0; i < 3; ++i) {
+                        Hinertia[i][i] = v.mass / (timestep * timestep);
+                    }
+
+                    // accumulators for external forces
+                    float3 f(0.0);
+                    float3x3 H(0.0f);
+
+                    // apply a collision constraint
+
+                    float pen;
+                    collide_sphere_plane(v.radius, v.position, planeoff, planen, pen);
+                
+                    if (pen > 0) {
+                        f -= collision_force(-1, stiffness, pen, planen);
+                        H += collision_hessian(-1, stiffness, pen, planen);
+                    }
+
+                    // compute body forces
+                    for (auto& force : body->forces) {
+                        if (force) force->add_force_and_hessian(vidx, f, H);
+                    }
+
+                    float3x3 rayleighDamping = (physics.dampingFactor / timestep) * H;
+
+                    float3x3 hessian = Hinertia + H + rayleighDamping;
+
+
+                    float3 force = finertia + f - mul(rayleighDamping, (v.position - v.prevPosition));
+
+
+                    float3 dx = solveHouseholderQR(hessian, force);
+                    
+                    v.prevDx = v.dx;
+                    v.dx = dx;
+                    v.position += dx;
+                }
+            }
+
+            // the vbd implementaion also computes the "merit energy" = elastic + inertial energy
+            // this quanitity is not very physically meaningful on its own, only its gradient is useful for the optimization
+            // zero gradients of the energy function correspond to roots of the dynamics equations
+            // so we use the norm of the gradient to measure the loss (which vbd does)
+            // we can derive the relative loss per iteration using this, which vbd uses for performance benchmarks
+            // (also note that normed force == normed energy gradient)
+            // we also need to wait untill everything has been updated before calculating the loss
+            // intermediate results will affect this
+            if (config.convergence) {
+
+
+
+
+                float normedDxDiff = 0; // absolute change
+                float normedDxCur = 0; // for computing the relative change between iterations
+                float normedForce = 0; // gradient criterion
+
+                // we have to recompute everything... :(
+                for (auto* body : bodies) {
+                    for (unsigned int vidx = 0; vidx < body->vertices.size(); ++vidx) {
+                        auto& v = body->vertices[vidx];
+
+                        normedDxDiff += length2(v.dx - v.prevDx);
+                        normedDxCur += length2(v.dx);
+
+                        float3 y = v.prevPosition + timestep * v.velocity + timestep * timestep * physics.a_ext;
+                        float3 finertia = -v.mass * (v.position - y) / (timestep * timestep);
+                        float3 f(0.0);
+                        float3x3 H(0.0);
+
+                        // TODO: replace this with the actual collision data
+                        float pen;
+                        collide_sphere_plane(0.5f, v.position, planeoff, planen, pen);
+
+                        if (pen > 0) {
+                            f -= collision_force(-1, stiffness, pen, planen);
+                            H += collision_hessian(-1, stiffness, pen, planen);
+                        }
+
+                        // compute body forces
+                        for (auto& force : body->forces) {
+                            if (force) force->add_force_and_hessian(vidx, f, H);
+                        }
+
+                        float3x3 rayleighDamping = (physics.dampingFactor / timestep) * H;
+                        float3 force = finertia + f - mul(rayleighDamping, (v.position - v.prevPosition));
+
+                        normedForce += dot(force, force);
+                    }
+                }
+
+                normedDxDiff = sqrt(normedDxDiff);
+                normedDxCur = sqrt(normedDxCur);
+
+                normedForce = sqrt(normedForce);
+
+
+                if (it % 10 == 0) {
+                    if (it != 0) {
+                        printf("[Physics] it: %d; grad loss: %3.6f; relative grad loss: %3.6f; abs change grad loss: %3.6f; rel change grad loss: %3.6f ", 
+                            it, normedForce, normedForce / firstLoss, abs(normedForce - lastLoss), (normedForce - lastLoss) / (lastLoss + 1e-8));
+                        printf(" normed dx: %3.6f; abs change dx: %3.6f; rel change dx: %3.6f\n", normedDxCur, normedDxDiff, normedDxDiff / (lastNormDx + 1e-8));
+                    }
+                    else {
+                        printf("[Physics] it: %d; grad loss: %3.6f; ", it, normedForce);
+                        printf(" normed dx: %3.6f;\n", normedDxCur);
+
+                    }
+
+                }
+
+                if (it == 0) {
+                    firstNormDx = normedDxCur;
+                    firstLoss = normedForce;
+                }
+
+                lastLoss = normedForce;
+                lastNormDx = normedDxCur;
+
+
+                // stop at an relative loss threashold error
+                // always run at least once otherwise we dont have the current error
+                //if (it != 0 && criterion < physics.tolerance * physics.tolerance * firstCriterion) break;
+            }
+
+        }
+
+        // printf("[Physics] step took %d iterations ending with %3.6f error\n", it, std::sqrt(criterion));
+
+        //e_tet->body->vertices[0].position = e_tet->body->vertices[0].prevPosition;
+
+        // commit the changes
+        for (auto* body : bodies) {
+            for (auto& v : body->vertices) {
+                v.velocity = (v.position - v.prevPosition) / timestep;
+                v.prevPosition = v.position;
+            }
+        }
+    }
+    
+    void sync() {
+        for (auto& e : entities) {
+            if (e && e->drawer) e->drawer->sync();
+        }
+    }
+
+    void draw() {
+        renderer.startFrame();
+        
+        for (auto& e : entities) {
+            if (e && e->drawer) e->drawer->draw(renderer);
+        }
+
+        for (auto& proxy : staticRenderers) {
+            if (proxy) proxy->draw(renderer);
+        }
+    }
+};
+
+
+
+bool debugging = true;
+int num_scenes = 3;
+bool stopSimulation = false;
+bool simPaused = false;
+int current_world = 0;
+
+bool keyBuffer[GLFW_KEY_LAST];
+
+float getInputAxis(int pos, int neg) {
+    float out = 0.0;
+    if (keyBuffer[pos]) out += 1.0f;
+    if (keyBuffer[neg]) out -= 1.0f;
+    return out;
+}
+
+void run(World world){
+    const float timestep = world.physics.timestep;
+
+    const double dt = 1.0 / 60.0;
+    double last = glfwGetTime();
+    double accumulator = 0.0;
+
+    // sync at the start of the first frame
+    world.sync();
+
+    while (!stopSimulation && !glfwWindowShouldClose(window))
+    {
+
+        glfwPollEvents();
+
+        double now = glfwGetTime();
+        double dt = now - last;
+        accumulator += dt;
+        last = now;
+        
+
+        // physics stepping
+        if (!simPaused && accumulator >= timestep) { 
+            // run the physics step at most once per real world time step
+            // if the physic simulation slows down then the whole thing will slow down. this is fine.
+            accumulator = 0;
+
+            world.stepPhysics(timestep);
+            world.sync();
+        }
+
+        world.draw();
+        
+        glfwSwapBuffers(window);
+
+        world.renderer.camera.origin +=
+            getInputAxis(GLFW_KEY_Q, GLFW_KEY_Z) *
+            world.renderer.camera.up * 20.0f * (float)dt;
+
+        float3 posCyl = world.renderer.camera.origin - world.renderer.camera.poi;
+        posCyl -= world.renderer.camera.up * dot(posCyl, world.renderer.camera.up);
+
+
+        float radius = std::hypot(posCyl.x, posCyl.z);
+        radius = std::max(0.01f, radius + getInputAxis(GLFW_KEY_S, GLFW_KEY_W) * 20.0f * (float)dt);
+
+
+        float theta = std::atan2(posCyl.z, posCyl.x);
+        theta += getInputAxis(GLFW_KEY_A, GLFW_KEY_D) * 60.0f * (float)dt * DegToRad;
+
+        world.renderer.camera.origin.x = radius * std::cos(theta);
+        world.renderer.camera.origin.z = radius * std::sin(theta);
+
+
+        world.renderer.updateCamera();
+    }
+}
+
+
+std::shared_ptr<Shader> defaultShader;
+std::shared_ptr<StaticTriangleMesh> plane;
+std::shared_ptr<StaticTriangleMesh> sphereParticle;
+std::shared_ptr<TetrahedraMesh> single_tet;
+std::shared_ptr<TetrahedraMesh> tet_cube;
+std::shared_ptr<TetrahedraMesh> tet_octa;
+
+
+void build_shared_resources() {
+    defaultShader = Shader::create(
+        (config.resources / "shaders" / "shaded.vert"),
+        (config.resources / "shaders" / "shaded.frag")
+    );
+
+
+    plane = StaticTriangleMesh::create(
+        (config.resources / "models" / "plane.obj"), 100.0f
+    );
+
+    sphereParticle = StaticTriangleMesh::create(
+        (config.resources / "models" / "smallsphere.obj"), 0.5f
+    );
+
+
+    auto base_path = (config.resources / "models" / "single_tet");
+    single_tet = TetrahedraMesh::create(
+        base_path / "single_tet.node",
+        base_path / "single_tet.ele",
+        base_path / "single_tet.face"
+    );
+    
+    base_path = (config.resources / "models" / "single_cube");
+    tet_cube = TetrahedraMesh::create(
+        base_path / "single_cube.node",
+        base_path / "single_cube.ele",
+        base_path / "single_cube.face"
+    );
+
+    base_path = (config.resources / "models" / "single_octahedron");
+    tet_octa = TetrahedraMesh::create(
+        base_path / "single_octahedron.node",
+        base_path / "single_octahedron.ele",
+        base_path / "single_octahedron.face"
+    );
+
+}
+
+Camera build_default_camera() {
+    Camera c;
+
+    c.origin = { 0.0, 1.0, -10 };
+    c.poi = { 0.0, 0.0, 0.0 };
+    c.up = { 0.0, 1.0, 0.0 };
 
     float globalAspectRatio = float(config.width) / float(config.height);
     float globalFOV = 45.0f; // vertical field of view
     float globalDepthMin = 5.0E-02; // for rasterization
     float globalDepthMax = 100.0f; // for rasterization
 
-    mainCamera->aspect = globalAspectRatio;
-    mainCamera->fovy = globalFOV;
-    mainCamera->zNear = globalDepthMin;
-    mainCamera->zFar = globalDepthMax;
+    c.aspect = globalAspectRatio;
+    c.fovy = globalFOV;
+    c.zNear = globalDepthMin;
+    c.zFar = globalDepthMax;
 
-    mainCamera->buildMatrices();
+    return c;
+}
 
-    Resource<Shader> defaultShader = engine.create<Shader>(
-        (config.resources / "shaders" / "default.vert"), 
-        (config.resources / "shaders" / "default.frag")
-    );
+/*
+xtream level!
+softbody_config.mass = 50000;
 
-    Resource<StaticTriangleMesh> obj = engine.create<StaticTriangleMesh>(
-        (config.resources / "models" / "smallsphere.obj")
-    );
+    softbody_config.mu = 1e9;
+    softbody_config.lambda = 1e9f;
+    softbody_config.deviatoricDamping = 1e-6;
+    softbody_config.hydrostaticDamping = 0; //1e-4;
+    physics.collisionStiffness = 1e+9;
 
-    auto base_tet_model = (config.resources / "models" / "tet_sphere");
-    Resource<TetrahedraMesh> obj2 = engine.create<TetrahedraMesh>(
-        base_tet_model / "tet_sphere.node",
-        base_tet_model / "tet_sphere.ele",
-        base_tet_model / "tet_sphere.face"
-    );
+*/
+SoftBody build_default_softbody() {
+    SoftBody softbody_config;
+    softbody_config.offset = float3(0.0, 5.0, 0.0);
+    softbody_config.scale = float3(1.0f);
+
+    softbody_config.mesh = single_tet;
+    softbody_config.shader = defaultShader;
+    softbody_config.color = float3(1.0f, 0.1f, 0.4f);
+
+    softbody_config.energy_model = EnergyModel::StableNeoHookeanNoLog;
+    softbody_config.differentiation_mode = ElasticEnergyDifferentiationMode::Analytical;
+    softbody_config.mass = 50;
+
+    softbody_config.mu = 1e4;
+    softbody_config.lambda = 1e5;
+    softbody_config.deviatoricDamping = 1e-6;
+    softbody_config.hydrostaticDamping = 0; 1e-6;
+
+    return softbody_config;
+}
+
+World debugScene() {
+
+    std::vector<std::shared_ptr<Entity>> entities;
+    Camera camera = build_default_camera();
+    PhysicsConfig physics;
+    std::vector<std::unique_ptr<RenderProxy>> staticRenderers;
+
+    float particle_radius = 0.5;
+
+    staticRenderers.emplace_back(std::make_unique<StaticRenderProxy>(defaultShader, plane, float3(0.5), float3(0.0, -1.0, 0.0)));
+
+
+    // particle system
+    Particles particle_config;
+    particle_config.radius = 0.5;
+    particle_config.mass = 1.0;
+    particle_config.mesh = sphereParticle;
+    particle_config.shader = defaultShader;
+
+    auto n_vertices = 10;
+    for (int i = 0; i < n_vertices; ++i) {
+        particle_config.positions.emplace_back(i, 1.0f, i);
+        particle_config.velocities.emplace_back(0.0f, 5.0 * i + 2.0, 0.0f);
+    }
+
+    std::shared_ptr<Entity> e_particles = std::make_shared<Entity>();
+    e_particles->drawer = std::move(std::make_unique<ParticleRenderProxy>(particle_config, e_particles));
+    e_particles->body = std::move(std::make_unique<PhysicsBody>());
+
+
+    for (int i = 0; i < n_vertices; ++i) {
+        Vertex v;
+        v.prevPosition = particle_config.positions[i];
+        v.velocity = particle_config.velocities[i];
+        v.mass = particle_config.mass;
+        v.radius = particle_config.radius;
+
+        e_particles->body->vertices.emplace_back(v);
+    }
+
+    // soft body 
+    std::shared_ptr<Entity> e_tet = std::make_shared<Entity>();
+    createSoftBody(build_default_softbody(), e_tet);
+
+
+    // Physics System configuration
+
+    physics.a_ext = float3(0.0, -9.8, 0.0);
+    physics.timestep = 1.0 / 60.0;
+    physics.tolerance = 1e-3;
+    physics.max_iterations = 50;
+    physics.dampingFactor = 1e-6;
+    physics.useCriterion = false;
+    physics.collisionStiffness = 1e+5;
+
+    entities.push_back(e_particles);
+    entities.push_back(e_tet);
+
+    return World(physics, camera, entities, std::move(staticRenderers));
+}
+
+/// DEMO SCENES
+///  1) Basic particles and plane
+///  2) finite differnces tet model
+///  3) Analytical tet model
+///  4) rayleigh damping
+///  5) performance benchmarks (used for data capture)
+///   5a) normal
+///   5b) self collapse failure
+///   5c) cube collision failure
+///   5d) particle collision failure (but cube is ok)
+
+World demo1() {
+
+    std::vector<std::shared_ptr<Entity>> entities;
+    Camera camera = build_default_camera();
+    PhysicsConfig physics;
+    std::vector<std::unique_ptr<RenderProxy>> staticRenderers;
+
+    staticRenderers.emplace_back(std::make_unique<StaticRenderProxy>(defaultShader, plane, float3(0.5), float3(0.0, -1.0, 0.0)));
+
+
+    // particle system
+    Particles particle_config;
+    particle_config.radius = 0.5;
+    particle_config.mass = 1.0;
+    particle_config.mesh = sphereParticle;
+    particle_config.shader = defaultShader;
+
+    auto n_vertices = 10;
+    for (int i = 0; i < n_vertices; ++i) {
+        particle_config.positions.emplace_back(i, 1.0f, i);
+        particle_config.velocities.emplace_back(0.0f, 5.0 * i + 2.0, 0.0f);
+    }
+
+    std::shared_ptr<Entity> e_particles = std::make_shared<Entity>();
+    e_particles->drawer = std::move(std::make_unique<ParticleRenderProxy>(particle_config, e_particles));
+    e_particles->body = std::move(std::make_unique<PhysicsBody>());
+
+
+    for (int i = 0; i < n_vertices; ++i) {
+        Vertex v;
+        v.prevPosition = particle_config.positions[i];
+        v.velocity = particle_config.velocities[i];
+        v.mass = particle_config.mass;
+        v.radius = particle_config.radius;
+
+        e_particles->body->vertices.emplace_back(v);
+    }
+
+
+    // Physics System configuration
+
+    physics.a_ext = float3(0.0, -9.8, 0.0);
+    physics.timestep = 1.0 / 60.0;
+    physics.tolerance = 1e-3;
+    physics.max_iterations = 50;
+    physics.dampingFactor = 0;
+    physics.useCriterion = false;
+    physics.collisionStiffness = 1e+5;
+
+    entities.push_back(e_particles);
+
+    return World(physics, camera, entities, std::move(staticRenderers));
+}
+
+
+World demo234(ElasticEnergyDifferentiationMode mode, float damping=0.0) {
+
+    std::vector<std::shared_ptr<Entity>> entities;
+    Camera camera = build_default_camera();
+    camera.origin = float3(0.0, 1.0, 6.0);
+
+
+    PhysicsConfig physics;
+    std::vector<std::unique_ptr<RenderProxy>> staticRenderers;
+
+    staticRenderers.emplace_back(std::make_unique<StaticRenderProxy>(defaultShader, plane, float3(0.5), float3(0.0, -1.0, 0.0)));
+
+
+   // soft body 
+    SoftBody softbody_config = build_default_softbody();
+    softbody_config.differentiation_mode = mode;
+    softbody_config.offset = float3(-1.0, 1.5, 0.0);
+    std::shared_ptr<Entity> e_tet = std::make_shared<Entity>();
+    createSoftBody(softbody_config, e_tet);
+
+
+    SoftBody softbody_config2 = build_default_softbody();
+    softbody_config2.differentiation_mode = mode;
+    softbody_config2.mu = 1e6;
+    softbody_config2.lambda = 1e6;
+    softbody_config2.offset = float3(1.0, 1.5, 0.0);
+    std::shared_ptr<Entity> e_tet2 = std::make_shared<Entity>();
+    createSoftBody(softbody_config2, e_tet2);
+
+
+
+    // Physics System configuration
+    physics.a_ext = float3(0.0, -9.8, 0.0);
+    physics.timestep = 1.0 / 60.0;
+    physics.tolerance = 1e-3;
+    physics.max_iterations = 50;
+    physics.dampingFactor = damping;
+    physics.useCriterion = false;
+    physics.collisionStiffness = 1e+5;
+
+    entities.push_back(e_tet);
+    entities.push_back(e_tet2);
+    return World(physics, camera, entities, std::move(staticRenderers));
+}
+
+// performance worlds
+World demo5(float mass, float mat_stiffness, float collision_stiffness, bool particles=false) {
+
+    std::vector<std::shared_ptr<Entity>> entities;
+    Camera camera = build_default_camera();
+    camera.origin = float3(0.0, 8.0, -15.0);
+
+
+    PhysicsConfig physics;
+    std::vector<std::unique_ptr<RenderProxy>> staticRenderers;
+
+    staticRenderers.emplace_back(std::make_unique<StaticRenderProxy>(defaultShader, plane, float3(0.5), float3(0.0, -1.0, 0.0)));
     
-    base_tet_model = (config.resources / "models" / "single_tet");
-    Resource<TetrahedraMesh> single_tet = engine.create<TetrahedraMesh>(
-        base_tet_model / "single_tet.node",
-        base_tet_model / "single_tet.ele",
-        base_tet_model / "single_tet.face"
-    );
+    // particle system
+    if (particles) {
 
-    // particle system resource
-    std::vector<Vertex> vertices;
+        Particles particle_config;
+        particle_config.radius = 0.5;
+        particle_config.mass = 1.0;
+        particle_config.mesh = sphereParticle;
+        particle_config.shader = defaultShader;
 
-    for(int i = 0; i < 10; ++ i){
-        vertices.emplace_back();
-        vertices[i].position = float3(i, 1.0f, i);
-        vertices[i].velocity = float3(0.0f, 5.0 * i + 2.0, 0.0f);
-    }
-
-    const float timestep = 1.0/60.0;
-
-    const double dt = 1.0 / 60.0;
-    double last = glfwGetTime();
-    double accumulator = 0.0;
-
-    float3 gravity(0.0, -9.8, 0.0);
-
-    float stiffness = 1e+5;
-    float planey = -1;
-    float3 planen(0.0, 1.0, 0.0); 
-
-    float mass = 1.0;
-
-    while (!glfwWindowShouldClose(window))
-    {
-
-        double now = glfwGetTime();
-        accumulator += now - last;
-        last = now;
-        
-        glfwPollEvents();
-
-        // physics stepping
-        while (accumulator >= timestep)
-        {
-            // naive physics update
-            for(auto &v : vertices){
-                float3 y = v.position + timestep * v.velocity + timestep * timestep * gravity;
-                float3 x_new = y;
-
-                for(int i = 0; i < 5; ++i){
-                    float3 f = - mass * (x_new - y) / (timestep * timestep);
-                    float3 H = float3(mass / (timestep * timestep));
-
-                    float3 diff = float3(0.0, planey - x_new.y, 0.0);
-                    float pen = dot(diff, planen);
-                    if (pen > 0) {
-                        f += stiffness * planen * diff;
-                        H.y += stiffness;
-                    }
-                    float3x3 Hmat;
-                    for(int i = 0; i < 3; ++i){
-                        Hmat[i][i] = H[i];
-                    }
-
-                    
-
-                    float3 dx = solveHouseholderQR(Hmat, f);
-                    if(length(dx) > 1){
-                        printf("length(dx)=  %f\n", length(dx));
-                        printf("H = I[%f %f %f]^T\n", H.x, H.y, H.z);
-                        // exit(-1);
-                    }
-
-                    // float3 dx = float3(f.x/H.x, f.y/H.y, f.z/H.z);
-                    x_new += dx;
-                }
-                
-                // pred - v.position + float3(0.0, () * (stiffness * pen), 0.0);
-
-                // no external forces yields the following
-                v.velocity = (x_new - v.position) / timestep;
-                v.position = x_new;
-            }
-
-            accumulator -= timestep;
+        auto n_vertices = 10;
+        for (int i = 0; i < n_vertices; ++i) {
+            particle_config.positions.emplace_back(i + 1, 1.0f, i);
+            particle_config.velocities.emplace_back(0.0f, 5.0 * i + 2.0, 0.0f);
         }
 
-        // Render
-        // Clear the colorbuffer
-        glClearColor(0.2f, 0.3f, 0.3f, 1.0f);
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        std::shared_ptr<Entity> e_particles = std::make_shared<Entity>();
+        e_particles->drawer = std::move(std::make_unique<ParticleRenderProxy>(particle_config, e_particles));
+        e_particles->body = std::move(std::make_unique<PhysicsBody>());
 
-        for(auto &v : vertices){
-            
-        float4x4 identity = linalg::identity;
-        identity *= 10;
-        identity.w = float4(v.position.x,v.position.y, v.position.z, 1.0);
+        for (int i = 0; i < n_vertices; ++i) {
+            Vertex v;
+            v.prevPosition = particle_config.positions[i];
+            v.velocity = particle_config.velocities[i];
+            v.mass = particle_config.mass;
+            v.radius = particle_config.radius;
 
-        // glUseProgram(shaderProgram);
-        defaultShader->useShader();
-
-
-        const GLint modelLoc = defaultShader->getUniformLocation("model");
-        glUniformMatrix4fv(
-            modelLoc,
-            1,
-            GL_FALSE,
-            &identity[0][0]
-        );
-
-        const GLint viewLoc = defaultShader->getUniformLocation("view");
-        glUniformMatrix4fv(
-            viewLoc,
-            1,
-            GL_FALSE,
-            &mainCamera->viewMat()[0][0]
-        );
-
-        const GLint projLoc = defaultShader->getUniformLocation("projection");
-        glUniformMatrix4fv(
-            projLoc,
-            1,
-            GL_FALSE,
-            &mainCamera->projMat()[0][0]
-        );
-        
-        obj->draw();
-
-        // single_tet->draw();
-        
+            e_particles->body->vertices.emplace_back(v);
         }
+        entities.push_back(e_particles);
 
-        glfwSwapBuffers(window);
     }
+
+    // soft body 
+    SoftBody softbody_config = build_default_softbody();
+    softbody_config.differentiation_mode = Analytical;
+    softbody_config.mesh = tet_cube;
+    softbody_config.mass = mass;
+    softbody_config.mu = mat_stiffness;
+    softbody_config.lambda = mat_stiffness;
+    if (particles) softbody_config.offset += float3(-1.0f, 0.0, 0.0);
+    std::shared_ptr<Entity> e_tet = std::make_shared<Entity>();
+    createSoftBody(softbody_config, e_tet);
+
+
+
+    // Physics System configuration
+    physics.a_ext = float3(0.0, -9.8, 0.0);
+    physics.timestep = 1.0 / 60.0;
+    physics.tolerance = 1e-3;
+    physics.max_iterations = 50;
+    physics.dampingFactor = 1e-6;
+    physics.useCriterion = false;
+    physics.collisionStiffness = collision_stiffness;
+
+    entities.push_back(e_tet);
+    return World(physics, camera, entities, std::move(staticRenderers));
 }
 
 int main(int argc, char *argv[])
 {
-
+    num_scenes = 10;
+    debugging = false;
+    current_world = 0;
     config = parse_args(argc, argv);
 
     window = setup_window();
+    build_shared_resources();
+    while (!glfwWindowShouldClose(window)) {
 
-    run();
+        printf("starting world %d...\n", current_world);
+        stopSimulation = false;
+        simPaused = true;
+        if (debugging) run(debugScene());
+        else if (current_world == 0) run(demo1());
+        else if (current_world == 1) run(demo234(ElasticEnergyDifferentiationMode::FiniteDifferences));
+        else if (current_world == 2) run(demo234(ElasticEnergyDifferentiationMode::Analytical));
+        else if (current_world == 3) run(demo234(ElasticEnergyDifferentiationMode::Analytical, 1e-6));
+        else if (current_world == 4) run(demo234(ElasticEnergyDifferentiationMode::Analytical, 5e-5));
+        else if (current_world == 5) run(demo234(ElasticEnergyDifferentiationMode::Analytical, 10e-5));
+        else if (current_world == 6) run(demo5(50, 5e3, 1e5, true));
+        else if (current_world == 7) run(demo5(5000, 1e4, 1e5, true));
+        else if (current_world == 8) run(demo5(50000, 1e9, 1e5, true));
+        else if (current_world == 9) run(demo5(50000, 1e9, 1e9, true));
+        else {
+            printf("%d is not a valid world selection! going to debug!\n", current_world); 
+            run(debugScene());
+        }
+
+        printf("resetting world...\n");
+    }
     
     glfwTerminate();
 
     return 0;
 }
 
+
 void key_callback(GLFWwindow* window, int key, int scancode, int action, int mode)
 {
+    if (action == GLFW_PRESS) {
+        keyBuffer[key] = true;
+    }
+    else if (action == GLFW_RELEASE) {
+        keyBuffer[key] = false;
+    }
+
     if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS)
         glfwSetWindowShouldClose(window, GL_TRUE);
+
+
+    
+    if (key == GLFW_KEY_R && action == GLFW_PRESS) {
+        stopSimulation = true;
+    }
+    if (key == GLFW_KEY_P && action == GLFW_PRESS) {
+        simPaused = !simPaused;
+    }
+
+    if (key == GLFW_KEY_K && action == GLFW_PRESS) {
+        stopSimulation = true;
+        debugging = !debugging;
+        if (!debugging) current_world = 0;
+    }
+
+    if (!debugging) {
+        if (key == GLFW_KEY_LEFT && action == GLFW_PRESS) {
+            stopSimulation = true;
+            current_world = std::max(0, std::min(current_world - 1, num_scenes - 1));
+        }
+        if (key == GLFW_KEY_RIGHT && action == GLFW_PRESS) {
+            stopSimulation = true;
+            current_world = std::max(0, std::min(current_world + 1, num_scenes - 1));
+        }
+    }
+
 }
 
 void mouse_button_callback(GLFWwindow* window, int button, int action, int mods) {
@@ -342,7 +1495,6 @@ void mouse_button_callback(GLFWwindow* window, int button, int action, int mods)
 }
 
 
-// mouse button events (you do not need to modify it unless you want to)
 void cursor_pos_callback(GLFWwindow* window, double mouse_x, double mouse_y) {
 	
 }

@@ -18,4 +18,7 @@ add_executable(CS488
 
 target_include_directories(CS488 PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/external/glfw/include)
 target_include_directories(CS488 PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/external/glew/include)
+
+target_include_directories(CS488 PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+
 target_link_libraries(CS488 glfw libglew_static)

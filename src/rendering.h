@@ -1,19 +1,17 @@
 #pragma once
 
 #include <vector>
-
+#include <map>
 #include "linalg.h"
 using namespace linalg::aliases;
 
-#include "engine.h"
+#include "resources/shader.h"
 
 constexpr float PI = 3.14159265358979f;
 constexpr float DegToRad = PI / 180.0f;
 constexpr float RadToDeg = 180.0f / PI;
 
-
-
-class Camera : public ManagedResource{
+class Camera {
     private:
     
     float4x4 view, proj;
@@ -45,8 +43,6 @@ class Camera : public ManagedResource{
         return m;
     }
 
-    
-
     public:
 
     float fovy, aspect, zNear, zFar;
@@ -69,31 +65,82 @@ class Camera : public ManagedResource{
     const float4x4 &projMat() {
         return proj;
     }
-
-    // lifetime management is a no-op
-    // resource system is used for sharing only
-    bool init_impl() { return true; }
-    void cleanup_impl() {}    
-
 };
 
-class Renderer {
+class Renderer;
+
+class RenderProxy {
+public:
+    virtual void sync() = 0;
+    virtual void draw(Renderer& renderer) = 0;
+};
+
+struct Renderer {
+  
+    std::shared_ptr<Shader> currentShader;
+    Camera camera;
+
+    void updateCamera() {
+        if (currentShader) setShaderUniforms();
+    }
+
+    void setShaderUniforms() {
+        const GLint viewLoc = currentShader->getUniformLocation("view");
+        glUniformMatrix4fv(
+            viewLoc,
+            1,
+            GL_FALSE,
+            &camera.viewMat()[0][0]
+        );
+
+        const GLint projLoc = currentShader->getUniformLocation("projection");
+        glUniformMatrix4fv(
+            projLoc,
+            1,
+            GL_FALSE,
+            &camera.projMat()[0][0]
+        );
+    }
+
+    void setShader(std::shared_ptr<Shader> newShader) {
+        if(newShader == currentShader) return;
+        currentShader = std::move(newShader);
+
+        if (!currentShader) return;
+        
+        currentShader->useShader();
+
+        setShaderUniforms();
+    }
+
+    void setTransform(const float4x4 &modelMat) {
+        const GLint modelLoc = currentShader->getUniformLocation("model");
+        glUniformMatrix4fv(
+            modelLoc,
+            1,
+            GL_FALSE,
+            &modelMat[0][0]
+        );
+    }
+
+    void setColor(const float3& color) {
+        const GLint loc = currentShader->getUniformLocation("baseColor");
+        if (loc != -1) {
+            glUniform3f(
+                loc,
+                color.x, color.y, color.z
+            );
+        }
+    }
+
+    Renderer(const Camera &camera) : camera{camera} { }
+
     
-}
 
-class RenderComponent {
-    virtual draw() = 0;
+    void startFrame(){
+         camera.buildMatrices();
+
+         glClearColor(0.2f, 0.3f, 0.3f, 1.0f);
+         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    }
 };
-
-class ParticleSystemRenderComponent {
-    Resource<Shader> 
-
-}
-
-class ParticleSystemNode {
-    // physics stuff
-    Resource<ParticleSystem> particles;
-
-    Resource<ParticleDrawer> drawer;
-    Resource<ParticleCollider> collider;
-}
