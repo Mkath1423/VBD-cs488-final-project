@@ -43,7 +43,6 @@ You can see these scene being animated in my demo video.
 
 ## Compilation
 
-(OUTDATED. FOLLOW THE SAME BUILD STEPS FROM A0)
 ### Windows
 
 #### Build Steps
